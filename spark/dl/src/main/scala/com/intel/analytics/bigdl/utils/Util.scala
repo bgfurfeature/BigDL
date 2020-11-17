@@ -21,9 +21,12 @@ import java.io._
 import com.intel.analytics.bigdl._
 import com.intel.analytics.bigdl.nn.Container
 import com.intel.analytics.bigdl.nn.tf.Const
+import com.intel.analytics.bigdl.optim.DistriOptimizer.{Cache, CacheV1}
 import com.intel.analytics.bigdl.tensor.TensorNumericMath.{NumericWildcard, TensorNumeric}
 import com.intel.analytics.bigdl.tensor._
+import org.apache.commons.lang.SerializationUtils
 import org.apache.commons.lang3.SerializationException
+import org.apache.spark.rdd.RDD
 
 import scala.reflect.ClassTag
 import scala.util.Try
@@ -92,7 +95,7 @@ object Util {
   }
 
 
-  private[bigdl] def getAndClearWeightBias[T: ClassTag]
+  def getAndClearWeightBias[T: ClassTag]
   (parameters: (Array[Tensor[T]], Array[Tensor[T]]))(implicit ev: TensorNumeric[T])
   : Array[Tensor[T]] = {
     if (parameters._1.length != 0) {
@@ -136,7 +139,7 @@ object Util {
     }
   }
 
-  private[bigdl] def getAndClearConsts[T: ClassTag](
+  def getAndClearConsts[T: ClassTag](
         model: Container[_, _, T])(implicit ev: TensorNumeric[T]): Map[String, Tensor[_]] = {
     val moduleConsts = model.findModules("Const")
       .map(_.asInstanceOf[Const[T, _]])
@@ -148,7 +151,7 @@ object Util {
     result
   }
 
-  private[bigdl] def putConsts[T: ClassTag](
+  def putConsts[T: ClassTag](
         model: Container[_, _, T],
         consts: Map[String, Tensor[_]])(implicit ev: TensorNumeric[T]) : Unit = {
     val moduleConsts = model.findModules("Const")
@@ -161,7 +164,7 @@ object Util {
     }
   }
 
-  private def clearTensor[T: ClassTag](tensors: Array[Tensor[T]])
+  def clearTensor[T: ClassTag](tensors: Array[Tensor[T]])
     (implicit ev: TensorNumeric[T]): Unit = {
     var i = 0
     while (i < tensors.length) {
@@ -176,7 +179,7 @@ object Util {
     }
   }
 
-  private[bigdl] def putWeightBias[T: ClassTag](
+  def putWeightBias[T: ClassTag](
       broadcastWeightBias: Array[Tensor[T]],
       localModel: Module[T])(implicit ev: TensorNumeric[T]): Unit = {
     val localWeightBias = localModel.parameters()._1
@@ -202,7 +205,7 @@ object Util {
     }
   }
 
-  private[bigdl] def initGradWeightBias[T: ClassTag](
+  def initGradWeightBias[T: ClassTag](
       broadcastWeightBias: Array[Tensor[T]],
       localModel: Module[T])(implicit ev: TensorNumeric[T]): Unit = {
     val (localWeightBias, localGradWeightBias) = localModel.parameters()
@@ -230,7 +233,7 @@ object Util {
    * except `resolveClass` method of [[ObjectInputStream]] is overridden,
    * which fix potential [[ClassNotFoundException]] caused by uncertain `latestUserDefinedLoader`.
    */
-  private[bigdl] def deserialize[T: ClassTag](objectData: Array[Byte]): T = {
+  def deserialize[T: ClassTag](objectData: Array[Byte]): T = {
     if (objectData == null) {
       throw new IllegalArgumentException("The byte[] must not be null")
     }
@@ -242,7 +245,7 @@ object Util {
    * except `resolveClass` method of [[ObjectInputStream]] is overridden,
    * which fix potential [[ClassNotFoundException]] caused by uncertain `latestUserDefinedLoader`.
    */
-  private[bigdl] def deserialize[T: ClassTag](inputStream: InputStream): T = {
+  def deserialize[T: ClassTag](inputStream: InputStream): T = {
     if (inputStream == null) {
       throw new IllegalArgumentException("The InputStream must not be null")
     }
@@ -265,4 +268,94 @@ object Util {
     }
   }
 
+  def cloneParameters[T: ClassTag]
+  (parameters: Array[Tensor[T]])(implicit ev: TensorNumeric[T])
+  : Array[Tensor[T]] = {
+    if (parameters != null) {
+      if (parameters.length != 0) {
+        var i = 0
+        val retParams = new Array[Tensor[T]](parameters.length)
+        val isQuantized = parameters.exists(_.getTensorType == QuantizedType)
+        val (isCompacted, storage) = if (!isQuantized) {
+          val storage = Storage(parameters(0).storage.array())
+          (parameters.map(_.nElement()).sum == storage.length(), storage)
+        } else {
+          (false, null)
+        }
+
+        val resultStorage = if (isCompacted) {
+          val resultStorage = Storage[T](storage.length())
+          System.arraycopy(storage.array(), parameters(0).storageOffset() - 1,
+            resultStorage.array(), 0, storage.length())
+          resultStorage
+        } else {
+          null
+        }
+
+        // clone parameters
+        while (i < parameters.length) {
+          if (parameters(i) != null) {
+            val param = parameters(i)
+            param.getTensorType match {
+              case QuantizedType =>
+                retParams(i) = SerializationUtils.clone(param).asInstanceOf[QuantizedTensor[T]]
+             case _ =>
+                retParams(i) = if (isCompacted) {
+                  Tensor[T](resultStorage, param.storageOffset(), param.size(), param.stride())
+                } else {
+                  param.clone()
+                }
+            }
+          }
+          i += 1
+        }
+        retParams
+      } else {
+        // just return an empty array when parameters is empty.
+        Array()
+      }
+    } else {
+      null
+    }
+  }
+
+  def setExtraParametersFromModelRDD[T: ClassTag]
+  (models: RDD[Cache[T]], trainingModel: Module[T], maxSize: Int)(implicit ev: TensorNumeric[T])
+  : Unit = {
+    if (trainingModel.getExtraParameter() != null && trainingModel.getExtraParameter().length > 0) {
+      val totalElements = models.map(_.localModels.head.getExtraParameter().map(_.nElement()).
+        reduce(_ + _)).first()
+
+      val extraStates = if (totalElements < maxSize) {
+        models.map(_.localModels.head.getExtraParameter()).first()
+      } else {
+        val individualLength = models.map(_.localModels.head.getExtraParameter().
+          map(_.nElement())).first()
+        val extraParamLength = individualLength.length
+        val extraState = new Array[Tensor[T]](extraParamLength)
+        (0 until extraParamLength).foreach(i =>
+          if (individualLength(i) < maxSize) {
+            extraState(i) = models.map(_.localModels.head.getExtraParameter()(i)).first()
+          } else {
+            val numChucks = if (individualLength(i) % maxSize == 0) {
+              individualLength(i) / maxSize
+            } else {
+              individualLength(i) / maxSize + 1
+            }
+            val storage = Storage(new Array[T](individualLength(i)))
+            for (j <- 0 until numChucks) {
+              val partArray = models.map(_.localModels.head.getExtraParameter()(i).storage().array()
+                .slice(j * maxSize, math.min(maxSize * (j + 1), individualLength(i)))).first()
+              System.arraycopy(partArray, 0, storage.array(), j * maxSize, partArray.length)
+            }
+            val trainParam = trainingModel.getExtraParameter()(i)
+            extraState(i) = Tensor(storage, trainParam.storageOffset(),
+              trainParam.size, trainParam.stride())
+          }
+        )
+        extraState
+      }
+      trainingModel.setExtraParameter(extraStates)
+    }
+  }
 }

@@ -16,17 +16,21 @@
 package com.intel.analytics.bigdl.tensor
 
 import com.intel.analytics.bigdl.mkl.MklDnn
+import com.intel.analytics.bigdl.nn.mkldnn.MemoryOwner
 import com.intel.analytics.bigdl.utils.{BigDLSpecHelper, T}
 import org.apache.commons.lang3.SerializationUtils
+import org.scalatest.BeforeAndAfter
 
-class DnnTensorSpec extends BigDLSpecHelper {
+class DnnTensorSpec extends BigDLSpecHelper{
+  implicit object Owner extends MemoryOwner {
+  }
   "nElement" should "be correct" in {
     val tensor = DnnTensor[Float](3, 4, 5)
     tensor.nElement() should be(3 * 4 * 5)
   }
 
-  "DnnTensor" should "only support float" in {
-    intercept[IllegalArgumentException] {
+  "DnnTensor" should "does not support double" in {
+    intercept[UnsupportedOperationException] {
       val t = DnnTensor[Double](3, 4, 5)
     }
   }

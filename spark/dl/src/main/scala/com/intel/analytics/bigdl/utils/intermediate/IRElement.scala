@@ -16,6 +16,7 @@
 
 package com.intel.analytics.bigdl.utils.intermediate
 
+import com.intel.analytics.bigdl.nn.MklInt8Convertible
 import com.intel.analytics.bigdl.nn.abstractnn.{AbstractModule, Activity, DataFormat, TensorModule}
 import com.intel.analytics.bigdl.optim.Regularizer
 import com.intel.analytics.bigdl.tensor.{Tensor, TensorNumericMath}
@@ -24,11 +25,13 @@ import com.intel.analytics.bigdl.tensor.TensorNumericMath.TensorNumeric
 import scala.reflect.ClassTag
 
 sealed class IROperator[T: ClassTag] extends Serializable {
-  val tag: ClassTag[T] = scala.reflect.classTag[T]
-  val numerics: TensorNumeric[T] = tag match {
-    case ClassTag.Float => TensorNumeric.NumericFloat.asInstanceOf[TensorNumeric[T]]
-    case ClassTag.Double => TensorNumeric.NumericDouble.asInstanceOf[TensorNumeric[T]]
-    case _ => throw new IllegalArgumentException(s"not supported class tag: ${tag}")
+  val numerics: TensorNumeric[T] = getNumerics(scala.reflect.classTag[T])
+  final def getNumerics[T](tag: ClassTag[T]) : TensorNumeric[T] = {
+    tag match {
+      case ClassTag.Float => TensorNumeric.NumericFloat.asInstanceOf[TensorNumeric[T]]
+      case ClassTag.Double => TensorNumeric.NumericDouble.asInstanceOf[TensorNumeric[T]]
+      case _ => throw new IllegalArgumentException(s"not supported class tag: ${tag}")
+    }
   }
   def getClassTagNumerics() : (Array[ClassTag[_]], Array[TensorNumeric[_]]) = {
     (Array(scala.reflect.classTag[T]), Array(numerics))
@@ -82,9 +85,6 @@ case class IRSpatialBatchNormalization[T: ClassTag](
 
 case class IRIdentity[T: ClassTag]() extends IROperator[T]
 
-case class IRDropout[T: ClassTag](initP: Double = 0.5, inplace: Boolean = false,
-                                  scale: Boolean = true) extends IROperator[T]
-
 case class IRReLU[T: ClassTag](ip: Boolean = false) extends IROperator[T]
 
 case class IRLinear[T: ClassTag](
@@ -98,8 +98,6 @@ case class IRLinear[T: ClassTag](
             initGradWeight: Tensor[T] = null,
             initGradBias: Tensor[T] = null) extends IROperator[T]
 
-case class IRSqueeze[T: ClassTag](dims: Array[Int], batchMode: Boolean) extends IROperator[T]
-
 case class IRSpatialCrossMapLRN[T: ClassTag](
             size: Int = 5,
             alpha: Double = 1.0,
@@ -111,7 +109,15 @@ case class IRSoftMax[T: ClassTag]() extends IROperator[T]
 
 case class IRSelectTable[T: ClassTag](dimension: Int) extends IROperator[T]
 
-case class IRCAddTable[T: ClassTag, D: ClassTag](inplace: Boolean = false) extends IROperator[T]
+case class IRCAddTable[T: ClassTag, D: ClassTag](inplace: Boolean = false) extends IROperator[T] {
+  private val ev = getNumerics(scala.reflect.classTag[T])
+  private val ev2 = getNumerics(scala.reflect.classTag[D])
+
+  override def getClassTagNumerics() : (Array[ClassTag[_]], Array[TensorNumeric[_]]) = {
+    (Array[ClassTag[_]](scala.reflect.classTag[T], scala.reflect.classTag[D]),
+      Array[TensorNumeric[_]](ev, ev2))
+  }
+}
 
 case class IRJoinTable[T: ClassTag](dimension: Int,
                                     nInputDims: Int = 0) extends IROperator[T]
@@ -132,7 +138,7 @@ private[bigdl] class IRElement[T: ClassTag](
   val name: String,
   val op: IROperator[T],
   private var weights: Tensor[T] = null,
-  private var gradWeights: Tensor[T] = null) extends Serializable {
+  private var gradWeights: Tensor[T] = null) extends Serializable with MklInt8Convertible {
 
   /**
    * set weight and bias

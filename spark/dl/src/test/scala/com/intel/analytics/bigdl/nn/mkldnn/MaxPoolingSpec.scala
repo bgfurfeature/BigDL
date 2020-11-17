@@ -15,11 +15,12 @@
  */
 package com.intel.analytics.bigdl.nn.mkldnn
 
-import com.intel.analytics.bigdl.mkl.{AlgKind, Memory}
-import com.intel.analytics.bigdl.nn.mkldnn.Phase.TrainingPhase
-import com.intel.analytics.bigdl.nn.{SpatialAveragePooling, SpatialMaxPooling}
-import com.intel.analytics.bigdl.tensor.Tensor
-import com.intel.analytics.bigdl.utils.BigDLSpecHelper
+import com.intel.analytics.bigdl.mkl.{AlgKind, DataType, Memory}
+import com.intel.analytics.bigdl.nn.abstractnn.DataFormat
+import com.intel.analytics.bigdl.nn.mkldnn.Phase.{InferencePhase, TrainingPhase}
+import com.intel.analytics.bigdl.nn.{Graph, SpatialAveragePooling, SpatialMaxPooling, StaticGraph}
+import com.intel.analytics.bigdl.tensor.{DnnTensor, Tensor}
+import com.intel.analytics.bigdl.utils.{BigDLSpecHelper, Engine, MklDnn}
 import com.intel.analytics.bigdl.utils.RandomGenerator.RNG
 import com.intel.analytics.bigdl.utils.intermediate.{BlasToIR, IRToDnn}
 import org.apache.commons.lang3.SerializationUtils
@@ -65,6 +66,38 @@ class MaxPoolingSpec extends BigDLSpecHelper {
 
     val grad2 = layer.backward(input, output2).toTensor[Float]
     val grad1 = seq.backward(input, output2)
+    grad1 should be(grad2)
+  }
+
+  "Max Pooling with NHWC format" should "be correct" in {
+    Engine.setEngineType(MklDnn)
+    val batchSize = 2
+    val input = Tensor[Float](batchSize, 28, 28, 480).apply1(e => Random.nextFloat())
+    val gradOutput = Tensor[Float](batchSize, 14, 14, 480).apply1(e => Random.nextFloat())
+
+    val pad = -1
+    RNG.setSeed(100)
+    val pool = MaxPooling(3, 3, 2, 2, padH = pad, padW = pad)
+    RNG.setSeed(100)
+    val layer = SpatialMaxPooling[Float](3, 3, 2, 2, padH = pad, padW = pad,
+      format = DataFormat.NHWC).ceil()
+    val layer2 = SpatialMaxPooling[Float](3, 3, 2, 2, padH = pad, padW = pad).ceil()
+
+    import com.intel.analytics.bigdl.nn
+    val static = nn.Sequential[Float]().add(layer2)
+      .toGraph().asInstanceOf[StaticGraph[Float]]
+    static.setInputFormats(Seq(Memory.Format.nhwc))
+    static.setOutputFormats(Seq(Memory.Format.nhwc))
+
+    val dnn = static.toIRgraph()
+
+    val output1 = dnn.forward(input)
+    val output2 = layer.forward(input).toTensor[Float]
+
+    output1 should be(output2)
+
+    val grad2 = layer.backward(input, output2).toTensor[Float]
+    val grad1 = dnn.backward(input, output2)
     grad1 should be(grad2)
   }
 
@@ -165,4 +198,51 @@ class MaxPoolingSpec extends BigDLSpecHelper {
 
     Tools.dense(pool.gradInput) should be (Tools.dense(cloned.gradInput))
   }
+
+
+  "max pooling with int8" should "be correct" in {
+    val inputShape = Array(4, 3, 5, 5)
+    val outputShape = Array(4, 3, 2, 2)
+
+    val kernel = 3
+    val pad = 1
+
+    val runtime = new MklDnnRuntime
+
+    val input = Tensor[Float](inputShape).rand(0, 1)
+
+    val heapData = HeapData(inputShape, Memory.Format.nchw, DataType.F32)
+    val nativeData = NativeData(inputShape, Memory.Format.nhwc, DataType.U8)
+    val inputScales = Array(input.max())
+
+    nativeData.setMask(0)
+    nativeData.setScales(inputScales.map(x => 255.0f / x))
+
+    val reorder = ReorderMemory(nativeData)
+    val pool = MaxPooling(3, 3, 2, 2)
+    val heapData2 = HeapData(outputShape, Memory.Format.nchw, DataType.F32)
+    val reorder2 = ReorderMemory(heapData2)
+
+    val seq = Sequential()
+      .add(Input(inputShape, Memory.Format.nchw))
+      .add(reorder)
+      .add(pool)
+      .add(reorder2)
+
+    seq.evaluate()
+    seq.compile(InferencePhase)
+    seq.forward(input)
+
+    val seq2 = Sequential()
+      .add(Input(inputShape, Memory.Format.nchw))
+      .add(MaxPooling(3, 3, 2, 2))
+      .add(ReorderMemory(HeapData(outputShape, Memory.Format.nchw)))
+
+    seq2.evaluate()
+    seq2.compile(InferencePhase)
+    seq2.forward(input)
+
+    Equivalent.nearequals(seq.output.toTensor, seq2.output.toTensor, 1e-2) should be (true)
+  }
+
 }

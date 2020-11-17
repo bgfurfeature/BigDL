@@ -12,7 +12,8 @@ Test template    BigDL Test
 4                    Spark2.3 on Yarn Test Suite
 5                    Quantization Test Suite
 6                    PySpark2.2 Test Suite
-
+7                    PySpark3.0 Test Suite
+8                    Spark3.0 on Yarn Test Suite
 
 *** Keywords ***
 Build SparkJar
@@ -59,24 +60,24 @@ Remove Input
 Run Spark Test 
    [Arguments]                      ${submit}                   ${spark_master}
    DownLoad Input
-   Log To Console                   begin lenet Train ${submit} --master ${spark_master} --conf "spark.serializer=org.apache.spark.serializer.JavaSerializer" --driver-memory 5g --executor-cores 16 --total-executor-cores 32 --class com.intel.analytics.bigdl.models.lenet.Train ${jar_path} -f ${mnist_data_source} -b 256 -e 3
-   Run Shell                        ${submit} --master ${spark_master} --conf "spark.serializer=org.apache.spark.serializer.JavaSerializer" --driver-memory 5g --executor-cores 16 --total-executor-cores 32 --class com.intel.analytics.bigdl.models.lenet.Train ${jar_path} -f ${mnist_data_source} -b 256 -e 3
+   Log To Console                   begin lenet Train ${submit} --master ${spark_master} --conf "spark.serializer=org.apache.spark.serializer.JavaSerializer" --driver-memory 5g --executor-cores 16 --total-executor-cores 32 --class com.intel.analytics.bigdl.models.lenet.Train ${jar_path} -f ${mnist_data_source} -b 256 -e 3 --optimizerVersion "optimizerV2"
+   Run Shell                        ${submit} --master ${spark_master} --conf "spark.serializer=org.apache.spark.serializer.JavaSerializer" --driver-memory 5g --executor-cores 16 --total-executor-cores 32 --class com.intel.analytics.bigdl.models.lenet.Train ${jar_path} -f ${mnist_data_source} -b 256 -e 3 --optimizerVersion "optimizerV2"
    Log To Console                   begin lenet Train local[4]
-   Run Shell                        ${submit} --master local[4] --class com.intel.analytics.bigdl.models.lenet.Train ${jar_path} -f /tmp/mnist -b 120 -e 1    
+   Run Shell                        ${submit} --master local[4] --class com.intel.analytics.bigdl.models.lenet.Train ${jar_path} -f /tmp/mnist -b 120 -e 1 --optimizerVersion "optimizerV2"
    Log To Console                   begin autoencoder Train 
-   Run Shell                        ${submit} --master ${spark_master} --executor-cores 4 --total-executor-cores 8 --class com.intel.analytics.bigdl.models.autoencoder.Train ${jar_path} -b 120 -e 1 -f /tmp/mnist
+   Run Shell                        ${submit} --master ${spark_master} --executor-cores 4 --total-executor-cores 8 --class com.intel.analytics.bigdl.models.autoencoder.Train ${jar_path} -b 120 -e 1 -f /tmp/mnist --optimizerVersion "optimizerV2"
    Log To Console                   begin PTBWordLM
-   Run Shell                        ${submit} --master ${spark_master} --conf "spark.serializer=org.apache.spark.serializer.JavaSerializer" --driver-memory 40g --executor-memory 40g --executor-cores 8 --total-executor-cores 8 --class com.intel.analytics.bigdl.example.languagemodel.PTBWordLM ${jar_path} -f ./simple-examples/data -b 120 --numLayers 2 --vocab 10001 --hidden 650 --numSteps 35 --learningRate 0.005 -e 1 --learningRateDecay 0.001 --keepProb 0.5 --overWrite
+   Run Shell                        ${submit} --master ${spark_master} --conf "spark.serializer=org.apache.spark.serializer.JavaSerializer" --driver-memory 40g --executor-memory 40g --executor-cores 8 --total-executor-cores 8 --class com.intel.analytics.bigdl.example.languagemodel.PTBWordLM ${jar_path} -f ./simple-examples/data -b 120 --numLayers 2 --vocab 10001 --hidden 650 --numSteps 35 --learningRate 0.005 -e 1 --learningRateDecay 0.001 --keepProb 0.5 --overWrite --optimizerVersion "optimizerV2"
    Log To Console                   begin resnet Train
-   Run Shell                        ${submit} --master ${spark_master} --conf "spark.serializer=org.apache.spark.serializer.JavaSerializer" --driver-memory 5g --executor-memory 5g --executor-cores 8 --total-executor-cores 32 --class com.intel.analytics.bigdl.models.resnet.TrainCIFAR10 ${jar_path} -f /tmp/cifar --batchSize 448 --optnet true --depth 20 --classes 10 --shortcutType A --nEpochs 1 --learningRate 0.1
+   Run Shell                        ${submit} --master ${spark_master} --conf "spark.serializer=org.apache.spark.serializer.JavaSerializer" --driver-memory 5g --executor-memory 5g --executor-cores 8 --total-executor-cores 32 --class com.intel.analytics.bigdl.models.resnet.TrainCIFAR10 ${jar_path} -f /tmp/cifar --batchSize 448 --optnet true --depth 20 --classes 10 --shortcutType A --nEpochs 1 --learningRate 0.1 --optimizerVersion "optimizerV2"
    Log To Console                   begin DLClassifierLeNet
-   Run Shell                        ${submit} --master ${spark_master} --executor-cores 16 --total-executor-cores 16 --driver-memory 5g --executor-memory 30g --class com.intel.analytics.bigdl.example.MLPipeline.DLClassifierLeNet ${jar_path} -b 1200 -f /tmp/mnist --maxEpoch 1
+   Run Shell                        ${submit} --master ${spark_master} --executor-cores 16 --total-executor-cores 16 --driver-memory 5g --executor-memory 30g --class com.intel.analytics.bigdl.example.MLPipeline.DLClassifierLeNet ${jar_path} -b 1200 -f /tmp/mnist --maxEpoch 1 
    Log To Console                   begin rnn Train
-   Run Shell                        ${submit} --master ${spark_master} --driver-memory 5g --executor-memory 5g --executor-cores 12 --total-executor-cores 12 --class com.intel.analytics.bigdl.models.rnn.Train ${jar_path} -f ./ -s ./models --nEpochs 1 --checkpoint ./model/ -b 12
+   Run Shell                        ${submit} --master ${spark_master} --driver-memory 5g --executor-memory 5g --executor-cores 12 --total-executor-cores 12 --class com.intel.analytics.bigdl.models.rnn.Train ${jar_path} -f ./ -s ./models --nEpochs 1 --checkpoint ./model/ -b 12 --optimizerVersion "optimizerV2"
    Log To Console                   begin inceptionV1 train
-   Run Shell                        ${submit} --master ${spark_master} --conf "spark.serializer=org.apache.spark.serializer.JavaSerializer" --driver-memory 20g --executor-memory 40g --executor-cores 10 --total-executor-cores 20 --class com.intel.analytics.bigdl.models.inception.TrainInceptionV1 ${jar_path} -b 40 -f ${imagenet_test_data_source} --learningRate 0.1 -i 100
+   Run Shell                        ${submit} --master ${spark_master} --conf "spark.serializer=org.apache.spark.serializer.JavaSerializer" --driver-memory 20g --executor-memory 40g --executor-cores 10 --total-executor-cores 20 --class com.intel.analytics.bigdl.models.inception.TrainInceptionV1 ${jar_path} -b 40 -f ${imagenet_test_data_source} --learningRate 0.1 -i 100 --optimizerVersion "optimizerV2"
    Log To Console                   begin text classification
-   Run Shell                        ${submit} --master ${spark_master} --driver-memory 5g --executor-memory 5g --total-executor-cores 32 --executor-cores 8 --class com.intel.analytics.bigdl.example.textclassification.TextClassifier ${jar_path} --batchSize 128 --baseDir /tmp/text_data --partitionNum 32
+   Run Shell                        ${submit} --master ${spark_master} --driver-memory 5g --executor-memory 5g --total-executor-cores 32 --executor-cores 8 --class com.intel.analytics.bigdl.example.textclassification.TextClassifier ${jar_path} --batchSize 128 --baseDir /tmp/text_data --partitionNum 32 
    Remove Input
 
 Spark2.2 Test Suite
@@ -112,6 +113,9 @@ Spark1.6 on Yarn Test Suite
 Spark2.3 on Yarn Test Suite
    Yarn Test Suite	spark_2.x	/opt/work/spark-2.3.1-bin-hadoop2.7
 
+Spark3.0 on Yarn Test Suite
+   Yarn Test Suite      spark_3.x       /opt/work/spark-3.0.0-bin-hadoop2.7
+
 Yarn Test Suite
    [Arguments]                      ${bigdl_spark_version}                ${spark_home}
    DownLoad Input
@@ -125,18 +129,18 @@ Yarn Test Suite
    Log To Console                   begin text classification
    Run Shell                        ${submit} --master yarn --deploy-mode client --conf "spark.serializer=org.apache.spark.serializer.JavaSerializer" --conf spark.yarn.executor.memoryOverhead=40000 --executor-cores 10 --num-executors 2 --driver-memory 20g --executor-memory 40g --class com.intel.analytics.bigdl.example.textclassification.TextClassifier ${jar_path} --batchSize 240 --baseDir /tmp/text_data --partitionNum 4
    Log To Console                   begin lenet
-   Run Shell                        ${submit} --master yarn --deploy-mode client --conf "spark.serializer=org.apache.spark.serializer.JavaSerializer" --executor-cores 10 --num-executors 3 --driver-memory 20g --class com.intel.analytics.bigdl.models.lenet.Train ${jar_path} -f ${mnist_data_source} -b 120 -e 3
+   Run Shell                        ${submit} --master yarn --deploy-mode client --conf "spark.serializer=org.apache.spark.serializer.JavaSerializer" --executor-cores 10 --num-executors 3 --driver-memory 20g --class com.intel.analytics.bigdl.models.lenet.Train ${jar_path} -f ${mnist_data_source} -b 120 -e 3 --optimizerVersion "optimizerV2"
    Log To Console                   begin autoencoder Train 
-   Run Shell                        ${submit} --master yarn --deploy-mode client --conf "spark.serializer=org.apache.spark.serializer.JavaSerializer" --executor-cores 10 --num-executors 3 --driver-memory 20g --class com.intel.analytics.bigdl.models.autoencoder.Train ${jar_path} -b 120 -e 1 -f /tmp/mnist
+   Run Shell                        ${submit} --master yarn --deploy-mode client --conf "spark.serializer=org.apache.spark.serializer.JavaSerializer" --executor-cores 10 --num-executors 3 --driver-memory 20g --class com.intel.analytics.bigdl.models.autoencoder.Train ${jar_path} -b 120 -e 1 -f /tmp/mnist --optimizerVersion "optimizerV2"
    Log To Console                   begin resnet Train
-   Run Shell                        ${submit} --master yarn --deploy-mode client --conf "spark.serializer=org.apache.spark.serializer.JavaSerializer" --executor-cores 10 --num-executors 3 --driver-memory 20g --class com.intel.analytics.bigdl.models.resnet.TrainCIFAR10 ${jar_path} -f /tmp/cifar --batchSize 120 --optnet true --depth 20 --classes 10 --shortcutType A --nEpochs 1 --learningRate 0.1
+   Run Shell                        ${submit} --master yarn --deploy-mode client --conf "spark.serializer=org.apache.spark.serializer.JavaSerializer" --executor-cores 10 --num-executors 3 --driver-memory 20g --class com.intel.analytics.bigdl.models.resnet.TrainCIFAR10 ${jar_path} -f /tmp/cifar --batchSize 120 --optnet true --depth 20 --classes 10 --shortcutType A --nEpochs 1 --learningRate 0.1 --optimizerVersion "optimizerV2"
    Log To Console                   begin rnn Train
-   Run Shell                        ${submit} --master yarn --deploy-mode client --conf "spark.serializer=org.apache.spark.serializer.JavaSerializer" --executor-cores 10 --num-executors 3 --driver-memory 20g --class com.intel.analytics.bigdl.models.rnn.Train ${jar_path} -f ./ -s ./models --nEpochs 1 --checkpoint ./model/ -b 120
+   Run Shell                        ${submit} --master yarn --deploy-mode client --conf "spark.serializer=org.apache.spark.serializer.JavaSerializer" --executor-cores 10 --num-executors 3 --driver-memory 20g --class com.intel.analytics.bigdl.models.rnn.Train ${jar_path} -f ./ -s ./models --nEpochs 1 --checkpoint ./model/ -b 120 --optimizerVersion "optimizerV2"
    Log To Console                   begin PTBWordLM
-   Run Shell                        ${submit} --master yarn --deploy-mode client --conf "spark.serializer=org.apache.spark.serializer.JavaSerializer" --executor-cores 8 --num-executors 1 --driver-memory 20g --executor-memory 40g --class com.intel.analytics.bigdl.example.languagemodel.PTBWordLM ${jar_path} -f ./simple-examples/data -b 120 --numLayers 2 --vocab 10001 --hidden 650 --numSteps 35 --learningRate 0.005 -e 1 --learningRateDecay 0.001 --keepProb 0.5 --overWrite
+   Run Shell                        ${submit} --master yarn --deploy-mode client --conf "spark.serializer=org.apache.spark.serializer.JavaSerializer" --executor-cores 8 --num-executors 1 --driver-memory 20g --executor-memory 40g --class com.intel.analytics.bigdl.example.languagemodel.PTBWordLM ${jar_path} -f ./simple-examples/data -b 120 --numLayers 2 --vocab 10001 --hidden 650 --numSteps 35 --learningRate 0.005 -e 1 --learningRateDecay 0.001 --keepProb 0.5 --overWrite --optimizerVersion "optimizerV2"
    Log To Console                   begin inceptionV1 train
-   Run Shell                        ${submit} --master yarn --deploy-mode client --conf "spark.serializer=org.apache.spark.serializer.JavaSerializer" --executor-cores 10 --num-executors 2 --driver-memory 20g --executor-memory 40g --class com.intel.analytics.bigdl.models.inception.TrainInceptionV1 ${jar_path} -b 40 -f ${imagenet_test_data_source} --learningRate 0.1 -i 100
-   Run Shell                        ${submit} --master yarn --deploy-mode client --executor-memory 2g --driver-memory 2g --executor-cores 10 --num-executors 2 --properties-file ${curdir}/dist/conf/spark-bigdl.conf --jars ${jar_path} --py-files ${curdir}/dist/lib/bigdl-${version}-python-api.zip --conf spark.driver.extraClassPath=${jar_path} --conf spark.executor.extraClassPath=bigdl-${version}-jar-with-dependencies.jar ${curdir}/pyspark/bigdl/models/lenet/lenet5.py -b 200 --action train --endTriggerType epoch --endTriggerNum 1
+   Run Shell                        ${submit} --master yarn --deploy-mode client --conf "spark.serializer=org.apache.spark.serializer.JavaSerializer" --executor-cores 10 --num-executors 2 --driver-memory 20g --executor-memory 40g --class com.intel.analytics.bigdl.models.inception.TrainInceptionV1 ${jar_path} -b 40 -f ${imagenet_test_data_source} --learningRate 0.1 -i 100 --optimizerVersion "optimizerV2"
+   Run Shell                        ${submit} --master yarn --deploy-mode client --executor-memory 2g --driver-memory 2g --executor-cores 10 --num-executors 2 --properties-file ${curdir}/dist/conf/spark-bigdl.conf --jars ${jar_path} --py-files ${curdir}/dist/lib/bigdl-${version}-python-api.zip --conf spark.driver.extraClassPath=${jar_path} --conf spark.executor.extraClassPath=bigdl-${version}-jar-with-dependencies.jar ${curdir}/pyspark/bigdl/models/lenet/lenet5.py -b 200 --action train --endTriggerType epoch --endTriggerNum 1 
    Remove Environment Variable      http_proxy                https_proxy
    Remove Input
    
@@ -147,4 +151,8 @@ PySpark2.2 Test Suite
    ${submit}=                       Catenate       SEPARATOR=/    /opt/work/spark-2.2.0-bin-hadoop2.7/bin    spark-submit
    Run Shell                        ${submit} --master ${spark_22_master} --conf "spark.serializer=org.apache.spark.serializer.JavaSerializer" --driver-memory 10g --executor-cores 14 --total-executor-cores 28 --py-files ${curdir}/dist/lib/bigdl-${version}-python-api.zip --jars ${jar_path} --properties-file ${curdir}/dist/conf/spark-bigdl.conf ${curdir}/pyspark/bigdl/models/lenet/lenet5.py -b 224 --action train --endTriggerType epoch --endTriggerNum 1
 
-
+PySpark3.0 Test Suite
+   Build SparkJar                   spark_3.x
+   Set Environment Variable         SPARK_HOME     /opt/work/spark-3.0.0-bin-hadoop2.7
+   ${submit}=                       Catenate       SEPARATOR=/    /opt/work/spark-3.0.0-bin-hadoop2.7/bin    spark-submit
+   Run Shell                        ${submit} --master ${spark_30_master} --conf "spark.serializer=org.apache.spark.serializer.JavaSerializer" --driver-memory 10g --executor-cores 14 --total-executor-cores 28 --py-files ${curdir}/dist/lib/bigdl-${version}-python-api.zip --jars ${jar_path} --properties-file ${curdir}/dist/conf/spark-bigdl.conf ${curdir}/pyspark/bigdl/models/lenet/lenet5.py -b 224 --action train --endTriggerType epoch --endTriggerNum 1

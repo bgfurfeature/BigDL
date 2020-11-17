@@ -114,7 +114,6 @@ class SharedStaticUtils():
         model = jvalue_creator(jvalue, bigdl_type)
         return model
 
-
 class Layer(JavaValue, SharedStaticUtils):
     """
     Layer is the basic component of a neural network
@@ -227,10 +226,19 @@ class Layer(JavaValue, SharedStaticUtils):
                 return i
             else:
                 raise Exception("Error unknown input type %s" % type(i))
+
+        def check_list(input):
+            if type(input) is list:
+                if len(input) == 0:
+                    raise Exception('Error when checking: empty input')
+                return list(map(lambda i: check_list(i), input))
+            else:
+                return to_jtensor(input)
+
         if type(input) is list:
             if len(input) == 0:
                 raise Exception('Error when checking: empty input')
-            return list(map(lambda i: to_jtensor(i), input)), True
+            return list(map(lambda i: check_list(i), input)), True
         else:
             return [to_jtensor(input)], False
 
@@ -902,6 +910,110 @@ class Model(Container):
         callBigDlFunc(bigdl_type, "saveGraphTopology", self.value, log_path)
         return self
 
+    def set_input_formats(self, input_formats, bigdl_type="float"):
+        """
+        set input formats for graph.
+        :param input_formats: list of input format numbers
+        :param bigdl_type:
+        :return:
+        """
+        jname = callBigDlFunc(bigdl_type,
+                              "getRealClassNameOfJValue",
+                              self.value)
+        if jname.split(".")[-1] == "StaticGraph" :
+            callBigDlFunc(bigdl_type, "setInputFormats", self.value, input_formats)
+        return self
+
+    def set_output_formats(self, output_formats, bigdl_type="float"):
+        """
+        set output formats for graph.
+        :param output_formats: list of output format numbers
+        :param bigdl_type:
+        :return:
+        """
+        jname = callBigDlFunc(bigdl_type,
+                              "getRealClassNameOfJValue",
+                              self.value)
+        if jname.split(".")[-1] == "StaticGraph":
+            callBigDlFunc(bigdl_type, "setOutputFormats", self.value, output_formats)
+        return self
+
+class Attention(Layer):
+
+    '''
+    Implementation of multiheaded attention and self-attention layers.
+
+    >>> attention = Attention(8, 4, 1.0)
+    creating: createAttention
+    '''
+
+    def __init__(self, hidden_size, num_heads, attention_dropout, bigdl_type="float"):
+        super(Attention, self).__init__(None, bigdl_type,
+                                        hidden_size, num_heads, attention_dropout)
+
+class FeedForwardNetwork(Layer):
+
+    '''
+    Implementation FeedForwardNetwork constructed with fully connected network.
+    Input with shape (batch_size, length, hidden_size)
+    Output with shape (batch_size, length, hidden_size)
+
+    >>> ffn = FeedForwardNetwork(8, 4, 1.0)
+    creating: createFeedForwardNetwork
+    '''
+
+    def __init__(self, hidden_size, filter_size, relu_dropout, bigdl_type="float"):
+        super(FeedForwardNetwork, self).__init__(None, bigdl_type,
+                                        hidden_size, filter_size, relu_dropout)
+class LayerNormalization(Layer):
+    '''
+    Applies layer normalization.
+
+    >>> norm = LayerNormalization(8)
+    creating: createLayerNormalization
+    '''
+
+    def __init__(self, hidden_size, bigdl_type="float"):
+        super(LayerNormalization, self).__init__(None, bigdl_type, hidden_size)
+
+class TableOperation(Layer):
+    '''
+    When two tensors have different size, firstly expand small size tensor to large size tensor,
+    and then do table operation.
+
+    >>> norm = TableOperation(CMulTable())
+    creating: createCMulTable
+    creating: createTableOperation
+    '''
+
+    def __init__(self, operation_layer, bigdl_type="float"):
+        super(TableOperation, self).__init__(None, bigdl_type, operation_layer)
+
+class ExpandSize(Layer):
+    '''
+    Expand tensor to configured size
+
+    >>> expand = ExpandSize([2, 3, 4])
+    creating: createExpandSize
+    '''
+
+    def __init__(self, sizes, bigdl_type="float"):
+        super(ExpandSize, self).__init__(None, bigdl_type, sizes)
+
+class Transformer(Layer):
+
+    '''
+    Implementation for Transformer
+    >>> layer = Transformer(20, 4, 2, 3, 1, 0.1, 0.1, 0.1)
+    creating: createTransformer
+    '''
+    def __init__(self, vocab_size, hidden_size, num_heads, filter_size, num_hidden_layers,
+                 postprocess_dropout, attention_dropout,
+                 relu_dropout, bigdl_type="float"):
+        super(Transformer, self).__init__(None, bigdl_type, vocab_size,
+                                               hidden_size, num_heads, filter_size,
+                                               num_hidden_layers, postprocess_dropout,
+                                               attention_dropout, relu_dropout)
 class Linear(Layer):
 
     '''
@@ -1138,6 +1250,19 @@ class Sequential(Container):
         model = Sequential(jvalue=jvalue)
         model.value = jvalue
         return model
+
+    def to_graph(self):
+        """
+        Convert a sequential model (Sequential) to a graph model (Model)
+        :return: A Python graph model
+        """
+        jvalue = callBigDlFunc(self.bigdl_type,
+                               "toGraph",
+                               self.value)
+        model = Model.from_jvalue(jvalue)
+        return model
+
+
 
 class TemporalConvolution(Layer):
 
@@ -1673,6 +1798,11 @@ class LSTMPeephole(Layer):
 
     def __init__(self, input_size=4, hidden_size=3, p=0.0, wRegularizer=None, uRegularizer=None, bRegularizer=None, bigdl_type="float"):
         super(LSTMPeephole, self).__init__(None, bigdl_type, input_size, hidden_size, p, wRegularizer, uRegularizer, bRegularizer)
+
+
+class Gemm(Layer):
+    def __init__(self, alpha=1.0, beta=1.0, trans_a=False, trans_b=False, bigdl_type="float"):
+        super(Gemm, self).__init__(None, bigdl_type, alpha, beta, trans_a, trans_b)
 
 
 class GRU(Layer):
@@ -3947,6 +4077,47 @@ class SelectTable(Layer):
                                           index)
 
 
+class SequenceBeamSearch(Layer):
+
+    '''
+    Find the translated sequence with the highest probability.
+
+
+    :param vocab_size: size of tokens
+    :param beam_size: number of beams
+    :param alpha: defining the strength of length normalization
+    :param decode_length: maximum length to decoded sequence
+    :param eos_id: id of eos token, used to determine when a sequence has finished
+    :param padding_value
+    :param num_hidden_layers: number of hidden layers
+    :param hidden_size: size of hidden layer
+
+
+    >>> sequenceBeamSearch = SequenceBeamSearch(4, 3, 0.0, 10, 2.0, 1.0, 2, 5)
+    creating: createSequenceBeamSearch
+    '''
+
+    def __init__(self,
+                vocab_size,
+                beam_size,
+                alpha,
+                decode_length,
+                eos_id,
+                padding_value,
+                num_hidden_layers,
+                hidden_size,
+                bigdl_type="float"):
+        super(SequenceBeamSearch, self).__init__(None, bigdl_type,
+                                                 vocab_size,
+                                                 beam_size,
+                                                 alpha,
+                                                 decode_length,
+                                                 eos_id,
+                                                 padding_value,
+                                                 num_hidden_layers,
+                                                 hidden_size)
+
+
 class SoftMax(Layer):
 
     '''
@@ -3961,8 +4132,9 @@ class SoftMax(Layer):
     '''
 
     def __init__(self,
+                 pos=1,
                  bigdl_type="float"):
-        super(SoftMax, self).__init__(None, bigdl_type)
+        super(SoftMax, self).__init__(None, bigdl_type, pos)
 
 
 class SoftMin(Layer):
@@ -4741,14 +4913,14 @@ class Unsqueeze(Layer):
     creating: createUnsqueeze
     '''
 
-    def __init__(self,
-                 pos,
-                 num_input_dims=INTMIN,
-                 bigdl_type="float"):
-        super(Unsqueeze, self).__init__(None, bigdl_type,
-                                        pos,
-                                        num_input_dims)
-
+    def __init__(self, pos, num_input_dims=INTMIN, bigdl_type="float"):
+        if isinstance(pos, int):
+            posList=[pos]
+            super(Unsqueeze, self).__init__(None, bigdl_type, to_list(posList), num_input_dims)
+        elif isinstance(pos, list):
+            super(Unsqueeze, self).__init__(None, bigdl_type, to_list(pos), num_input_dims)
+        else:
+            raise Exception("Error invalid input")
 
 class Reshape(Layer):
     '''
@@ -5494,6 +5666,119 @@ class Cropping3D(Layer):
     """
     def __init__(self, dim1Crop, dim2Crop, dim3Crop, data_format="channel_first", bigdl_type="float"):
         super(Cropping3D, self).__init__(None, bigdl_type, dim1Crop, dim2Crop, dim3Crop, data_format)
+
+        
+class RoiAlign(Layer):
+    """
+    Region of interest aligning (RoIAlign) for Mask-RCNN
+
+    The RoIAlign uses average pooling on bilinear-interpolated sub-windows to convert
+    the features inside any valid region of interest into a small feature map with a
+    fixed spatial extent of pooledH * pooledW (e.g., 7 * 7).
+
+    An RoI is a rectangular window into a conv feature map.
+    Each RoI is defined by a four-tuple (x1, y1, x2, y2) that specifies its
+    top-left corner (x1, y1) and its bottom-right corner (x2, y2).
+
+    RoIAlign works by dividing the h * w RoI window into an pooledH * pooledW grid of
+    sub-windows of approximate size h/H * w/W. In each sub-window, compute exact values
+    of input features at four regularly sampled locations, and then do average pooling on
+    the values in each sub-window.
+
+    Pooling is applied independently to each feature map channel
+
+    :param spatial_scale:  spatial scale
+    :param sampling_ratio: sampling ratio
+    :param pooled_h:       spatial extent in height
+    :param pooled_w:       spatial extent in width
+
+    >>> import numpy as np
+    >>> input_data = np.random.rand(1,2,6,8)
+    >>> input_rois = np.array([0, 0, 7, 5, 6, 2, 7, 5, 3, 1, 6, 4, 3, 3, 3, 3],dtype='float').reshape(4,4)
+    >>> m = RoiAlign(1.0,3,2,2)
+    creating: createRoiAlign
+    >>> out = m.forward([input_data,input_rois])
+    """
+
+    def __init__(self,
+                 spatial_scale,
+                 sampling_ratio,
+                 pooled_h,
+                 pooled_w,
+                 bigdl_type="float"):
+        super(RoiAlign, self).__init__(None, bigdl_type,
+                                         spatial_scale,
+                                         sampling_ratio,
+                                         pooled_h,
+                                         pooled_w)
+
+class Pooler(Layer):
+    """
+    Pooler selects the feature map which matches the size of RoI for RoIAlign
+
+    :param resolution:     the resolution of pooled feature maps. Height equals width.
+    :param scales:         spatial scales of each feature map
+    :param sampling_ratio: sampling ratio
+
+    >>> import numpy as np
+    >>> feature0 = np.random.rand(1,2,2,2)
+    >>> feature1 = np.random.rand(1,2,4,4)
+    >>> feature2 = np.random.rand(1,2,8,8)
+    >>> features = [feature0, feature1, feature2]
+    >>> input_rois = np.array([0, 0, 3, 3, 2, 2, 50, 50, 50, 50, 500, 500],dtype='float').reshape(3,4)
+    >>> m = Pooler(2,[1.0, 0.5, 0.25],2)
+    creating: createPooler
+    >>> out = m.forward([features,input_rois])
+    """
+
+    def __init__(self,
+                 resolution,
+                 scales,
+                 sampling_ratio,
+                 bigdl_type="float"):
+        super(Pooler, self).__init__(None, bigdl_type,
+                                     resolution,
+                                     scales,
+                                     sampling_ratio)
+
+class FPN(Layer):
+    """
+    Feature Pyramid Network (FPN) for Mask-RCNN
+
+    :param in_channels_list:    number of channels of feature maps
+    :param out_channels:        number of channels of FPN output
+    :param top_blocks:          top blocks option
+                                extra operation to be performed on the smallest
+                                resolution FPN output, whose result is appended
+                                to the result list
+                                0 for null,
+                                1 for using max pooling on the last level
+                                2 for extra layers P6 and P7 in RetinaNet
+    :param in_channels_of_p6p7     number of input channels of P6 P7
+    :param out_channels_of_p6p7    number of output channels of P6 P7
+
+    >>> import numpy as np
+    >>> feature1 = np.random.rand(1,1,8,8)
+    >>> feature2 = np.random.rand(1,2,4,4)
+    >>> feature3 = np.random.rand(1,4,2,2)
+    >>> m = FPN([1,2,4],2,2,4,2)
+    creating: createFPN
+    >>> out = m.forward([feature1, feature2, feature3])
+    """
+
+    def __init__(self,
+                 in_channels_list,
+                 out_channels,
+                 top_blocks=0,
+                 in_channels_of_p6p7=0,
+                 out_channels_of_p6p7=0,
+                 bigdl_type="float"):
+        super(FPN, self).__init__(None, bigdl_type,
+                                        in_channels_list,
+                                        out_channels,
+                                        top_blocks,
+                                        in_channels_of_p6p7,
+                                        out_channels_of_p6p7)
 
 def _test():
     import doctest

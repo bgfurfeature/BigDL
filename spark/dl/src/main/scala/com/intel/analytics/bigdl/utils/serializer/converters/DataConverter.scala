@@ -166,7 +166,8 @@ object DataConverter extends DataConverter{
         VariableFormatConverter.setAttributeValue(context, attributeBuilder, value)
       } else if (valueType =:= universe.typeOf[InitializationMethod]) {
         InitMethodConverter.setAttributeValue(context, attributeBuilder, value)
-      } else if (valueType.toString == ModuleSerializer.regularizerType.toString) {
+      } else if (valueType.toString == ModuleSerializer.regularizerType.toString
+        || valueType <:< universe.typeOf[Regularizer[_]]) {
         RegularizerConverter.setAttributeValue(context, attributeBuilder, value)
       } else if (valueType <:< universe.typeOf[Tensor[_]]) {
         TensorConverter.setAttributeValue(context, attributeBuilder, value)
@@ -397,6 +398,8 @@ object DataConverter extends DataConverter{
             attrValue.setShape(shape)
             ShapeConverter.getAttributeValue(context, attrValue.build).asInstanceOf[BigDLShape]
           }).toArray
+
+        case _ => throw new UnsupportedOperationException("Unsupported data type: " + listType)
       }
       arr
     }

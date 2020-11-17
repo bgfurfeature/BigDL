@@ -15,13 +15,14 @@
  */
 package com.intel.analytics.bigdl.nn.mkldnn
 import com.intel.analytics.bigdl.mkl.{DataType, Memory, MklDnn}
+import com.intel.analytics.bigdl.nn.MklInt8Convertible
 import com.intel.analytics.bigdl.nn.abstractnn.Activity
 import com.intel.analytics.bigdl.tensor.{DnnTensor, Tensor}
 import com.intel.analytics.bigdl.utils.{T, Table}
 
 import scala.collection.mutable.ArrayBuffer
 
-class ConcatTable extends MklDnnContainer {
+class ConcatTable extends MklDnnContainer with MklInt8Convertible {
 
   output = T()
 
@@ -101,13 +102,13 @@ class ConcatTable extends MklDnnContainer {
         }
       }
     }
-    val outputMD = MklDnn.MemoryDescInit(shape.length, shape, DataType.F32, Memory.Format.any)
+    val outputMD = MklDnnMemory.MemoryDescInit(shape.length, shape, DataType.F32, Memory.Format.any)
     val scales = grads.map(_ => 1f)
-    val pd = MklDnn.SumPrimitiveDescCreate(outputMD, grads.length, scales,
+    val pd = MklDnnMemory.SumPrimitiveDescCreate(outputMD, grads.length, scales,
       subGradInputs.map(_.getPrimitiveDescription(runtime)))
     _gradInputFormats = Array(MemoryData.primitiveOutput(pd))
     tensorPrimitives(grads.length) = _gradInputFormats(0).getPrimitive(runtime)
-    sumPrimitive = Array(MklDnn.PrimitiveCreate2(pd,
+    sumPrimitive = Array(MklDnnMemory.PrimitiveCreate2(pd,
       subGradInputs.map(_.getPrimitive(runtime)), new Array[Int](grads.length),
       grads.length, _gradInputFormats.map(_.getPrimitive(runtime)), 1))
     gradInput = initTensor(_gradInputFormats(0))
@@ -127,6 +128,10 @@ class ConcatTable extends MklDnnContainer {
     }
     _gradOutputWeightFormats = realGradsBuffer.toArray
     _gradOutputWeightFormats
+  }
+
+  private[mkldnn] def reconstruct(): Unit = {
+    mklDnnModules = modules.map(_.asInstanceOf[MklDnnModule]).toArray
   }
 
   override private[mkldnn] def inputFormats() = {

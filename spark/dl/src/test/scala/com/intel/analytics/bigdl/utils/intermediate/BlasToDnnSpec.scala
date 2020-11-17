@@ -16,6 +16,7 @@
 
 package com.intel.analytics.bigdl.utils.intermediate
 
+import breeze.numerics._
 import com.intel.analytics.bigdl.example.loadmodel.AlexNet
 import com.intel.analytics.bigdl.mkl.Memory
 import com.intel.analytics.bigdl.models.inception.{Inception_Layer_v1, Inception_v1_NoAuxClassifier}
@@ -39,7 +40,7 @@ class BlasToDnnSpec extends BigDLSpecHelper {
   }
 
   override def doAfter(): Unit = {
-    System.setProperty("bigdl.engineType", "mklblas")
+    System.clearProperty("bigdl.engineType")
   }
   "vgg16 blas to dnn" should "work properly" in {
     val batchSize = 2
@@ -89,6 +90,30 @@ class BlasToDnnSpec extends BigDLSpecHelper {
     Equivalent.nearequals(gradInputDnn, gradInputBlas, 1e-6) should be(true)
   }
 
+  "inception_v1 blas to dnn" should "work properly" in {
+    val batchSize = 2
+    val classNum = 1000
+    RandomGenerator.RNG.setSeed(1)
+
+    val input = Tensor[Float](Array(batchSize, 3, 224, 224)).apply1(_ =>
+      RandomGenerator.RNG.uniform(0.1, 1.0).toFloat)
+    val gradOutput = Tensor[Float](batchSize, classNum).apply1(_ =>
+      RandomGenerator.RNG.uniform(1, 10).toFloat)
+
+    val blas = Inception_v1_NoAuxClassifier.graph(classNum, false).asInstanceOf[StaticGraph[Float]]
+    blas.setInputFormats(Seq(Memory.Format.nchw))
+    blas.setOutputFormats(Seq(Memory.Format.nc))
+    val irBlas = blas.cloneModule().toIRgraph()
+
+    val outBlas = blas.forward(input).toTensor[Float]
+    val gradInputBlas = blas.backward(input, gradOutput).toTensor[Float]
+
+    val outDnn = irBlas.forward(input).toTensor[Float]
+    val gradInputDnn = irBlas.backward(input, gradOutput).toTensor[Float]
+
+    Equivalent.nearequals(outDnn, outBlas, 1e-6) should be(true)
+  }
+
   "resnet50 blas to dnn" should "work properly" in {
     val batchSize = 2
     val classNum = 1000
@@ -117,5 +142,41 @@ class BlasToDnnSpec extends BigDLSpecHelper {
     val gradInputTensor = Tensor[Float]().resize(gradInputDnn.size()).copy(gradInputDnn)
 
     Equivalent.nearequals(outDnn, outBlas, 1e-6) should be(true)
+  }
+
+  "resnet50 dnn to blas" should "work properly" in {
+    val batchSize = 2
+    val classNum = 1000
+    RandomGenerator.RNG.setSeed(1000)
+    val blas = ResNet.graph(classNum,
+      T("shortcutType" -> ShortcutType.B, "depth" -> 50,
+        "optnet" -> false, "dataset" -> DatasetType.ImageNet)).asInstanceOf[StaticGraph[Float]]
+    val irBlas = blas.toIRgraph()
+
+    for (i <- 0 to 3) {
+      val input = Tensor[Float](2, 3, 224, 224).rand()
+      val gradOutput = Tensor[Float](2, 1000).rand()
+      irBlas.training()
+      irBlas.forward(input)
+      irBlas.backward(input, gradOutput)
+    }
+    val input = Tensor[Float](2, 3, 224, 224).rand()
+    irBlas.evaluate()
+    irBlas.forward(input)
+
+    val p1 = blas.getParameters()
+    val p2 = irBlas.getParameters()
+    p1._1.copy(p2._1)
+    p1._2.copy(p2._2)
+    blas.setExtraParameter(irBlas.getExtraParameter())
+
+    val in = Tensor[Float](2, 3, 224, 224).rand()
+    blas.evaluate()
+    irBlas.evaluate()
+
+    val out1 = blas.forward(in).toTensor[Float]
+    val out2 = irBlas.forward(in).toTensor[Float]
+
+    Equivalent.getunequals(out1, out2, 1e-4) should be(true)
   }
 }

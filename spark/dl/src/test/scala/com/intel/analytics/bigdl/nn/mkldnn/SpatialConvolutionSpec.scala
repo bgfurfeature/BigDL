@@ -18,7 +18,7 @@ package com.intel.analytics.bigdl.nn.mkldnn
 
 import com.intel.analytics.bigdl._
 import com.intel.analytics.bigdl.mkl._
-import com.intel.analytics.bigdl.nn.mkldnn.Phase.TrainingPhase
+import com.intel.analytics.bigdl.nn.mkldnn.Phase.{InferencePhase, TrainingPhase}
 import com.intel.analytics.bigdl.nn.{Xavier, Zeros}
 import com.intel.analytics.bigdl.numeric.NumericFloat
 import com.intel.analytics.bigdl.tensor.{DnnStorage, Tensor}
@@ -29,6 +29,79 @@ import org.scalatest.{FlatSpec, Matchers}
 import scala.util.Random
 
 class SpatialConvolutionSpec extends FlatSpec with Matchers {
+
+  "MKL-DNN Dilated Convolution compared with BLAS Dilated Convolution" should "work correctly" in {
+    val nInputPlane = 2
+    val nOutputPlane = 4
+    val kW = 3
+    val kH = 3
+    val dW = 4
+    val dH = 4
+    val padW = 0
+    val padH = 0
+    var (dilationH, dilationW) = (1, 1)
+
+    var input = Tensor[Float](2, 2, 23, 23).apply1(e => Random.nextFloat())
+    var gradOutput = Tensor[Float](2, 4, 6, 6).apply1(e => Random.nextFloat())
+
+
+    def compareHelper(input: Tensor[Float], gradOutput: Tensor[Float],
+                      dilationHeight: Int, dilationWidth: Int): Unit = {
+      RNG.setSeed(100)
+      var mkldnnConv = SpatialConvolution(nInputPlane, nOutputPlane, kW, kH, dW, dH, padW, padH,
+        dilationH = dilationH, dilationW = dilationW)
+
+
+      RNG.setSeed(100)
+
+      val blasConv = nn.SpatialDilatedConvolution[Float](nInputPlane, nOutputPlane, kW, kH, dW, dH,
+        padW, padH, dilationH = dilationH, dilationW = dilationW)
+
+      val mkldnnSeq = Sequential()
+        .add(Input(input.size(), Memory.Format.nchw))
+        .add(mkldnnConv)
+        .add(ReorderMemory(HeapData(gradOutput.size(), Memory.Format.nchw)))
+
+      mkldnnSeq.compile(TrainingPhase)
+
+      val output = mkldnnSeq.forward(input)
+      val grad1 = mkldnnSeq.backward(input, gradOutput)
+
+      val weight1 = mkldnnConv.weight.dense
+      val gradweight1 = mkldnnConv.gradWeight.dense
+      val bias1 = mkldnnConv.bias.dense
+      val gradbias1 = mkldnnConv.gradBias.dense
+
+      val output2 = blasConv.forward(input)
+      val grad2 = blasConv.updateGradInput(input, gradOutput)
+      blasConv.accGradParameters(input, gradOutput)
+
+      val weight2 = blasConv.weight
+      val gradweight2 = blasConv.gradWeight
+      val bias2 = blasConv.bias
+      val gradbias2 = blasConv.gradBias
+
+      Equivalent.nearequals(weight1, weight2.resizeAs(weight1)) should be(true)
+      Equivalent.nearequals(gradweight1, gradweight2.resizeAs(gradweight1)) should be(true)
+      Equivalent.nearequals(bias1, bias2) should be(true)
+      Equivalent.nearequals(gradbias1, gradbias2) should be(true)
+      Equivalent.nearequals(output.toTensor, output2) should be(true)
+      Equivalent.nearequals(grad1.toTensor, grad2) should be(true)
+    }
+
+    compareHelper(input, gradOutput, dilationH, dilationW)
+
+
+
+    dilationH = 2
+    dilationW = 2
+    input = Tensor[Float](2, 2, 23, 23).apply1(e => Random.nextFloat())
+    gradOutput = Tensor[Float](2, 4, 5, 5).apply1(e => Random.nextFloat())
+
+    compareHelper(input, gradOutput, dilationH, dilationW)
+
+  }
+
   "ConvolutionDnn with format=nchw and ngroup=1" should "work correctly" in {
     val nInputPlane = 2
     val nOutputPlane = 4
@@ -107,7 +180,7 @@ class SpatialConvolutionSpec extends FlatSpec with Matchers {
 
     val weight1 = conv.weight.dense
     val gradweight1 = conv.gradWeight.dense
-    val bias1 = Tools.dense(conv.bias.native).toTensor[Float]
+    val bias1 = Tools.dense(conv.bias.native[Float]).toTensor[Float]
     val gradbias1 = Tools.dense(conv.gradBias.dense).toTensor
 
     val output2 = layer.forward(input)
@@ -607,6 +680,103 @@ class SpatialConvolutionSpec extends FlatSpec with Matchers {
     Equivalent.nearequals(model.getParameters()._2, blas.getParameters()._2, 1e-4) should be (true)
   }
 
+  "conv quantization" should "work correctly" in {
+    System.setProperty("bigdl.mkldnn.fusion.convrelu", "true")
+    RNG.setSeed(1)
+    val inputShape = Array(1, 2, 12, 12)
+    val outputShape = Array(1, 8)
+    val model = Sequential()
+      .add(Input(inputShape, Memory.Format.nchw))
+      .add(SpatialConvolution(2, 4, 5, 5).setName("conv2"))
+      .add(ReLU()).setName("relu")
+      .add(MaxPooling(2, 2, 2, 2).setName("pool2"))
+      .add(Linear(4 * 4 * 4, 8).setName("ip1"))
+      .add(ReorderMemory(HeapData(outputShape, Memory.Format.nc)))
+    model.evaluate()
+
+    val input = Tensor[Float](inputShape).rand(-100, 100)
+    model.compile(InferencePhase)
+    println(model.forward(input))
+
+    val output = model.output.toTensor[Float].clone()
+
+    model.setInputDimMask(1, true)
+    model.calcScales(input)
+    model.release()
+
+    val quantized = model.cloneModule().quantize()
+    quantized.asInstanceOf[Sequential].compile(InferencePhase)
+
+    quantized.forward(input)
+    println(quantized.output)
+    System.clearProperty("bigdl.mkldnn.fusion.convrelu")
+
+    Equivalent.nearequals(output, quantized.output.toTensor, 1e-1) should be (true)
+  }
+
+  "unsigned input quantization" should "work correctly" in {
+    RNG.setSeed(1)
+
+    val inputShape = Array(1, 2, 12, 12)
+    val outputShape = Array(1, 4, 8, 8)
+
+    val initBias = Tensor[Float](4).fill(1.0f)
+
+    val model = Sequential()
+      .add(Input(inputShape, Memory.Format.nchw))
+      .add(SpatialConvolution(2, 4, 5, 5, initBias = initBias)).setName("conv2")
+      .add(ReorderMemory(HeapData(outputShape, Memory.Format.nchw)))
+
+    model.evaluate()
+    val input = Tensor[Float](inputShape).rand(-1, 1)
+    model.compile(InferencePhase)
+    val output = model.forward(input).toTensor.clone()
+    model.calcScales(input)
+
+    val quantized = model.quantize()
+    quantized.asInstanceOf[Sequential].compile(InferencePhase)
+    quantized.forward(input)
+    Equivalent.nearequals(output, quantized.output.toTensor, 1e-1) should be (true)
+  }
+
+  "generate the convolution scales with random" should "work correctly" in {
+    RNG.setSeed(1)
+    val inputShape = Array(1, 1, 2, 2)
+    val outputShape = Array(1, 2, 1, 1)
+
+    val inputData = Array[Float](-100, 12, 14, 67)
+    val input = Tensor[Float](inputShape).rand(-100, 100)
+
+    val initWeight = Tensor[Float](Array(2, 1, 2, 2)).rand(-10, 10)
+    val initBias = Tensor[Float](Array(2)).rand(-1, 1)
+
+    val conv = SpatialConvolution(1, 2, 2, 2)
+
+    val seq = Sequential()
+      .add(Input(inputShape, Memory.Format.nchw))
+      .add(conv)
+      .add(ReorderMemory(HeapData(outputShape, Memory.Format.nchw)))
+
+    seq.compile(InferencePhase)
+    seq.forward(input)
+
+    val outputFP32Model = seq.forward(input).toTensor.clone()
+
+    seq.calcScales(input)
+
+    val quantizedModel = seq.quantize()
+    quantizedModel.asInstanceOf[Sequential].compile(InferencePhase)
+
+    val outputInt8Model = quantizedModel.forward(input).toTensor.clone()
+
+    println(outputFP32Model)
+    println(outputInt8Model)
+
+    outputFP32Model.storage().array().zip(outputInt8Model.storage().array()).foreach { x =>
+      (Math.abs(x._1 - x._2) / Math.max(Math.abs(x._1), Math.abs(x._2)) <= 1e-1) should be (true)
+    }
+  }
+
   def prototxt(inputShape: Array[Int], name: String,
     nOutput: Int, kernel: Int, pad: Int, stride: Int): String = {
       s"""
@@ -702,7 +872,7 @@ class SpatialConvolutionSpec extends FlatSpec with Matchers {
 
     if (defaultFormat != outputFormat.layout) {
       val inputFormat = HeapData(src.size(), defaultFormat)
-      val reorder = ReorderMemory(inputFormat, outputFormat, null, null)
+      val reorder = ReorderMemory.create(inputFormat, outputFormat, null, null)
       reorder.setRuntime(new MklDnnRuntime)
       reorder.initFwdPrimitives(Array(inputFormat), TrainingPhase)
       reorder.updateOutput(src).toTensor

@@ -15,8 +15,8 @@
  */
 package com.intel.analytics.bigdl.nn.mkldnn
 
-import com.intel.analytics.bigdl.mkl.Memory
-import com.intel.analytics.bigdl.nn.mkldnn.Phase.TrainingPhase
+import com.intel.analytics.bigdl.mkl.{DataType, Memory}
+import com.intel.analytics.bigdl.nn.mkldnn.Phase.{InferencePhase, TrainingPhase}
 import com.intel.analytics.bigdl.numeric.NumericFloat
 import com.intel.analytics.bigdl.tensor.{DnnTensor, Tensor}
 import com.intel.analytics.bigdl.utils.{BigDLSpecHelper, T}
@@ -27,15 +27,15 @@ class CAddTableSpec extends BigDLSpecHelper {
     val layer = CAddTable()
     val model = Sequential()
     val concat = ConcatTable()
-    concat.add(ReorderMemory(HeapData(Array(2, 2), Memory.Format.nc),
+    concat.add(ReorderMemory.create(HeapData(Array(2, 2), Memory.Format.nc),
       NativeData(Array(2, 2), Memory.Format.nc), HeapData(Array(2, 2), Memory.Format.nc),
       NativeData(Array(2, 2), Memory.Format.nc)))
-    concat.add(ReorderMemory(HeapData(Array(2, 2), Memory.Format.nc),
+    concat.add(ReorderMemory.create(HeapData(Array(2, 2), Memory.Format.nc),
       NativeData(Array(2, 2), Memory.Format.nc), HeapData(Array(2, 2), Memory.Format.nc),
       NativeData(Array(2, 2), Memory.Format.nc)))
     model.add(concat)
     model.add(layer)
-    model.add(ReorderMemory(NativeData(Array(2, 2), Memory.Format.nc),
+    model.add(ReorderMemory.create(NativeData(Array(2, 2), Memory.Format.nc),
       HeapData(Array(2, 2), Memory.Format.nc), NativeData(Array(2, 2), Memory.Format.nc),
       HeapData(Array(2, 2), Memory.Format.nc)))
     model.compile(Phase.TrainingPhase, Array(HeapData(Array(2, 2), Memory.Format.nc)))
@@ -57,6 +57,8 @@ class CAddTableSpec extends BigDLSpecHelper {
   }
 
   "caddtable with java serialization" should "work correctly" in {
+    implicit object Owner extends MemoryOwner {
+    }
     val shape = Array(2, 3, 4, 4)
     val _1 = Tensor(shape).rand(-1, 1)
     val _2 = Tensor(shape).rand(-1, 1)
@@ -93,5 +95,51 @@ class CAddTableSpec extends BigDLSpecHelper {
 
     Tools.dense(cat.gradInput.toTable(1)) should be (Tools.dense(cloned.gradInput.toTable(1)))
     Tools.dense(cat.gradInput.toTable(2)) should be (Tools.dense(cloned.gradInput.toTable(2)))
+    Owner.releaseResources()
+  }
+
+  "CAddTable u8" should "be correct" in {
+    val shape = Array(4, 3, 5, 5)
+    val model = Sequential()
+    val concat = ConcatTable()
+    val cadd = CAddTable()
+
+    model.add(Input(shape, Memory.Format.nchw))
+    model.add(concat).add(cadd)
+
+    val input = Tensor[Float](shape).rand(0, 1)
+
+    val nativeData1 = NativeData(shape, Memory.Format.nhwc, DataType.U8)
+    val nativeData2 = NativeData(shape, Memory.Format.nhwc, DataType.U8)
+
+    nativeData1.setMask(0)
+    nativeData1.setScales(Array(255.0f / input.clone().abs().max()))
+
+    nativeData2.setMask(0)
+    nativeData2.setScales(Array(255.0f / input.clone().abs().max()))
+
+    concat.add(ReorderMemory(nativeData1))
+    concat.add(ReorderMemory(nativeData2))
+
+    model.add(ReorderMemory(HeapData(shape, Memory.Format.nchw)))
+
+    model.evaluate()
+    model.compile(InferencePhase)
+    model.forward(input)
+
+
+    val seq2 = Sequential()
+      .add(Input(shape, Memory.Format.nchw))
+      .add(ConcatTable()
+        .add(ReorderMemory(NativeData(shape, Memory.Format.nhwc)))
+        .add(ReorderMemory(NativeData(shape, Memory.Format.nchw))))
+      .add(CAddTable())
+      .add(ReorderMemory(HeapData(shape, Memory.Format.nchw)))
+
+    seq2.evaluate()
+    seq2.compile(InferencePhase)
+    seq2.forward(input)
+
+    println()
   }
 }

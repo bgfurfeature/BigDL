@@ -58,6 +58,8 @@ mv spark-version/1.5-plus/pom.xml spark-version/1.5-plus/pom.xml.origin
 cat spark-version/1.5-plus/pom.xml.origin | sed 's/<artifactId>1.5-plus<\/artifactId>/<artifactId>1.5-plus-${SPARK_PLATFORM}<\/artifactId>/' > spark-version/1.5-plus/pom.xml
 mv spark-version/2.0/pom.xml spark-version/2.0/pom.xml.origin
 cat spark-version/2.0/pom.xml.origin | sed 's/<artifactId>2.0<\/artifactId>/<artifactId>2.0-${SPARK_PLATFORM}<\/artifactId>/' > spark-version/2.0/pom.xml
+mv spark-version/3.0/pom.xml spark-version/3.0/pom.xml.origin
+cat spark-version/3.0/pom.xml.origin | sed 's/<artifactId>3.0<\/artifactId>/<artifactId>3.0-${SPARK_PLATFORM}<\/artifactId>/' > spark-version/3.0/pom.xml
 
 function deploy {
     mvn clean install -DskipTests -P sign -Dspark.version=$1 -DSPARK_PLATFORM=$2 $3
@@ -69,8 +71,9 @@ function deploy {
 deploy 2.1.1 SPARK_2.1 '-P spark_2.x'
 deploy 2.2.0 SPARK_2.2 '-P spark_2.x'
 deploy 2.3.1 SPARK_2.3 '-P spark_2.x'
-deploy 2.4.0 SPARK_2.4 '-P spark_2.x'
+deploy 2.4.3 SPARK_2.4 '-P spark_2.x'
 
 mv dl/pom.xml.origin dl/pom.xml
 mv spark-version/1.5-plus/pom.xml.origin spark-version/1.5-plus/pom.xml
 mv spark-version/2.0/pom.xml.origin spark-version/2.0/pom.xml
+mv spark-version/3.0/pom.xml.origin spark-version/3.0/pom.xml

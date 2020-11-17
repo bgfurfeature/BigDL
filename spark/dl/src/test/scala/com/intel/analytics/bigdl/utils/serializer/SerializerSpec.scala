@@ -42,6 +42,7 @@ class SerializerSpec extends BigDLSpecHelper {
     "com.intel.analytics.bigdl.nn.tf.ControlDependency",
     "com.intel.analytics.bigdl.utils.tf.AdapterForTest",
     "com.intel.analytics.bigdl.utils.serializer.TestModule",
+    "com.intel.analytics.bigdl.utils.TestModule",
     "com.intel.analytics.bigdl.utils.ExceptionTest",
     "com.intel.analytics.bigdl.utils.serializer.SubModuleOne",
     "com.intel.analytics.bigdl.utils.serializer.SubModuleTwo",
@@ -67,7 +68,8 @@ class SerializerSpec extends BigDLSpecHelper {
     "com.intel.analytics.bigdl.nn.mkldnn.BlasWrapper",
     "com.intel.analytics.bigdl.nn.mkldnn.Output",
     "com.intel.analytics.bigdl.nn.mkldnn.InputWrapper",
-    "com.intel.analytics.bigdl.utils.intermediate.IRGraph"
+    "com.intel.analytics.bigdl.utils.intermediate.IRGraph",
+    "com.intel.analytics.bigdl.nn.mkldnn.RNN"
   )
 
   // Maybe one serial test class contains multiple module test

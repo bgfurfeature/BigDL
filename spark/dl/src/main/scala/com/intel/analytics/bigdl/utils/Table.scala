@@ -75,6 +75,8 @@ class Table private[bigdl](
 
   def foreach[U](f: ((Any, Any)) => U): Unit = state.foreach(f)
 
+  def map[U](func: ((Any, Any)) => U): Iterable[U] = state.map(func)
+
   def get[T](key: Any): Option[T] = {
     state.get(key).map(_.asInstanceOf[T])
   }
@@ -133,7 +135,10 @@ class Table private[bigdl](
       return false
     }
     this.state.keys.foreach(key => {
-      if (this.state(key) != other.state(key)) {
+      if (this.state(key).isInstanceOf[Array[_]] && other.state(key).isInstanceOf[Array[_]]) {
+        return (this.state(key).asInstanceOf[Array[_]].deep ==
+          other.state(key).asInstanceOf[Array[_]].deep)
+      } else if (this.state(key) != other.state(key)) {
         return false
       }
     })

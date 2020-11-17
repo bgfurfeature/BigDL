@@ -17,9 +17,9 @@
 package com.intel.analytics.bigdl.nn.mkldnn
 
 import com.intel.analytics.bigdl.mkl._
-import com.intel.analytics.bigdl.nn.abstractnn.{Activity, Initializable}
+import com.intel.analytics.bigdl.nn.abstractnn.{Activity, DataFormat, Initializable}
 import com.intel.analytics.bigdl.nn.mkldnn.Phase.{InferencePhase, TrainingPhase}
-import com.intel.analytics.bigdl.nn.{Ones, VariableFormat, Zeros}
+import com.intel.analytics.bigdl.nn.{MklInt8Convertible, Ones, VariableFormat, Zeros}
 import com.intel.analytics.bigdl.tensor._
 
 import scala.collection.mutable.ArrayBuffer
@@ -31,8 +31,9 @@ class SpatialBatchNormalization(
   private val initWeight: Tensor[Float] = null,
   private val initBias: Tensor[Float] = null,
   private val initGradWeight: Tensor[Float] = null,
-  private val initGradBias: Tensor[Float] = null
-) extends MklDnnLayer with Initializable {
+  private val initGradBias: Tensor[Float] = null,
+  val format: DataFormat = DataFormat.NCHW
+) extends MklDnnLayer with Initializable with MklInt8Convertible {
 
   @transient private var forwardDesc: Long = 0L
   private var _relu: Boolean = false
@@ -42,6 +43,65 @@ class SpatialBatchNormalization(
     this
   }
   def relu: Boolean = _relu
+
+  // reminder: runningMean/runningVariance in blas batch_norm is
+  // same to scaled runningMean/runningVariance in dnn.
+  private[bigdl] var needScale = false
+
+  class SwitchablePrimitives() {
+    private var _forwardDesc: Long = 0
+    private var _updateOutputMemoryPrimitives : Array[Long] = _
+    private var _updateOutputPrimitives: Array[Long] = _
+    private var _fwdPrimDesc: Long = 0
+    private var _inputFormat: NativeData = _
+    private var _outputFormat: NativeData = _
+
+    def switchInOutFormats(): Unit = {
+      if (_inputFormat == null) {
+        _inputFormat = MemoryData.operationWant(fwdPrimDesc, Query.SrcPd)
+      }
+      if (_outputFormat == null) {
+        _outputFormat = MemoryData.operationWant(fwdPrimDesc, Query.DstPd)
+      }
+      _inputFormats(0) = _inputFormat
+      _outputFormats(0) = _outputFormat
+    }
+
+    def fwdPrimDesc: Long = {
+      if (_fwdPrimDesc == 0) {
+        _fwdPrimDesc = if (relu) {
+          val postOps = MklDnnMemory.CreatePostOps()
+          MklDnn.PostOpsAppendEltwise(postOps, 1.0f, AlgKind.EltwiseRelu, 0.0f, 0.0f)
+          val attr = MklDnnMemory.CreateAttr()
+          MklDnn.AttrSetPostOps(attr, postOps)
+          MklDnnMemory.PrimitiveDescCreateV2(_forwardDesc, attr, runtime.engine, 0)
+        } else {
+          MklDnnMemory.PrimitiveDescCreate(_forwardDesc, runtime.engine, 0)
+        }
+      }
+      _fwdPrimDesc
+    }
+
+    def forwardDesc(gen: () => Long): Long = {
+      if (_forwardDesc == 0) {
+        _forwardDesc = gen()
+      }
+      _forwardDesc
+    }
+
+    def switchUpdateOutputMemoryPrimitives(gen: () => (Array[Long], Array[Long])): Unit = {
+      if (_updateOutputMemoryPrimitives == null) {
+        val generated = gen()
+        _updateOutputMemoryPrimitives = generated._1
+        _updateOutputPrimitives = generated._2
+      }
+      updateOutputMemoryPrimitives = _updateOutputMemoryPrimitives
+      updateOutputPrimitives = _updateOutputPrimitives
+    }
+  }
+
+  @transient private lazy val trainingPrimitives = new SwitchablePrimitives
+  @transient private lazy val inferencePrimitives = new SwitchablePrimitives
 
   @transient private var updateOutputTensors: Array[Tensor[Float]] = _
   @transient private var updateOutputMemoryPrimitives: Array[Long] = _
@@ -58,9 +118,14 @@ class SpatialBatchNormalization(
   val weightAndBias = new TensorMMap(Array(nOutput * 2))
   val gradWeightAndBias = new TensorMMap(Array(nOutput * 2))
 
-  var scaleFactor: Float = 0.0f
-  var biasFactor: Float = 0.0f
+  // TODO the two should be learnable parameters
+  var scaleFactor: Float = 1.0f
+  var biasFactor: Float = 1.0f
 
+  private val runningMeanScaled = Tensor[Float].resizeAs(runningMean.dense)
+  private val runningVarianceScaled = Tensor[Float].resizeAs(runningVariance.dense)
+
+  // the blank shoud be here, otherwise the runningVarianceScaled will be a method
   {
     val wInit = Ones // RandomUniform(0, 1)
     val bInit = Zeros
@@ -130,61 +195,62 @@ class SpatialBatchNormalization(
     // weight and bias should be combined
     val weightAndBias: NativeData = NativeData(Array(nOutput * 2), Memory.Format.x)
 
-    // init phase status
-    initPhase(phase)
-    forwardDesc = modelPhase match {
-      case TrainingPhase =>
-        MklDnn.BatchNormForwardDescInit(PropKind.Forward,
-          inputs(0).getMemoryDescription(), eps.toFloat, MklDnn.BatchNormFlag.mkldnn_use_scaleshift)
-      case InferencePhase =>
-        // we always use the weight and bias / scale and offset. So the flags should be combined
-        // with use_scaleshift and use_global_stats.
-        MklDnn.BatchNormForwardDescInit(PropKind.ForwardInference,
-          inputs(0).getMemoryDescription(), eps.toFloat,
-          MklDnn.BatchNormFlag.mkldnn_use_global_stats | MklDnn.BatchNormFlag.mkldnn_use_scaleshift)
-      case _ => throw new UnsupportedOperationException
-    }
+    // the bn only accept F32 as input, like lrn
+    val src = NativeData(inputs.head.shape, inputs.head.layout, DataType.F32)
 
-    val primDesc = if (relu) {
-      val postOps = MklDnn.CreatePostOps()
-      MklDnn.PostOpsAppendEltwise(postOps, 1.0f, AlgKind.EltwiseRelu, 0.0f, 0.0f)
-      val attr = MklDnn.CreateAttr()
-      MklDnn.AttrSetPostOps(attr, postOps)
-      MklDnn.PrimitiveDescCreateV2(forwardDesc, attr, runtime.engine, 0)
-      // TODO we should destroy these ops
-    } else {
-      MklDnn.PrimitiveDescCreate(forwardDesc, runtime.engine, 0)
-    }
-
+    // init once
     if (_inputFormats == null) {
       _inputFormats = new Array[MemoryData](1)
-    }
-
-    if (_outputFormats == null) {
+      require(_outputFormats == null)
       _outputFormats = new Array[MemoryData](1)
     }
 
-    _inputFormats(0) = MemoryData.operationWant(primDesc, Query.SrcPd)
-    _outputFormats(0) = MemoryData.operationWant(primDesc, Query.DstPd)
+    // init phase status
+    initPhase(phase)
 
-    val (srcs, dsts) = if (modelPhase == TrainingPhase) {
-      val srcs = Array(inputFormats()(0), weightAndBias).map(_.getPrimitive(runtime))
-      val dsts = Array(outputFormats()(0), mean, variance).map(_.getPrimitive(runtime))
-      (srcs, dsts)
-    } else {
-      val srcs = Array(inputFormats()(0), mean, variance, weightAndBias).map { x =>
-        x.getPrimitive(runtime)
-      }
-      val dsts = Array(outputFormats()(0).getPrimitive(runtime))
-      (srcs, dsts)
+    modelPhase match {
+      case TrainingPhase =>
+        forwardDesc = trainingPrimitives.forwardDesc(() => MklDnnMemory.BatchNormForwardDescInit(
+          PropKind.Forward,
+          src.getMemoryDescription(), eps.toFloat, MklDnn.BatchNormFlag.mkldnn_use_scaleshift))
+        val fwdPrimDesc = trainingPrimitives.fwdPrimDesc
+        trainingPrimitives.switchInOutFormats()
+        trainingPrimitives.switchUpdateOutputMemoryPrimitives(() => {
+          val srcs = Array(inputFormats()(0), weightAndBias).map(_.getPrimitive(runtime))
+          val dsts = Array(outputFormats()(0), mean, variance).map(_.getPrimitive(runtime))
+          val indexes = Array.fill(srcs.length)(0)
+          val primitive = MklDnnMemory.PrimitiveCreate2(fwdPrimDesc, srcs, indexes,
+            srcs.length, dsts, dsts.length)
+          val _updateOutputMemoryPrimitives = srcs ++ dsts
+          val _updateOutputPrimitives = Array(primitive)
+          (_updateOutputMemoryPrimitives, _updateOutputPrimitives)
+        })
+      case InferencePhase =>
+        // we always use the weight and bias / scale and offset. So the flags should be combined
+        // with use_scaleshift and use_global_stats.
+        forwardDesc = inferencePrimitives.forwardDesc(() =>
+          MklDnnMemory.BatchNormForwardDescInit(PropKind.ForwardInference,
+            src.getMemoryDescription(), eps.toFloat, MklDnn.BatchNormFlag.mkldnn_use_global_stats
+              | MklDnn.BatchNormFlag.mkldnn_use_scaleshift))
+        val fwdPrimDesc = inferencePrimitives.fwdPrimDesc
+        inferencePrimitives.switchInOutFormats()
+        inferencePrimitives.switchUpdateOutputMemoryPrimitives(() => {
+          val srcs = Array(inputFormats()(0), mean, variance, weightAndBias).map(_.getPrimitive
+          (runtime))
+          val dsts = Array(outputFormats()(0).getPrimitive(runtime))
+          val indexes = Array.fill(srcs.length)(0)
+          val primitive = MklDnnMemory.PrimitiveCreate2(fwdPrimDesc, srcs, indexes,
+            srcs.length, dsts, dsts.length)
+          val _updateOutputMemoryPrimitives = srcs ++ dsts
+          val _updateOutputPrimitives = Array(primitive)
+          (_updateOutputMemoryPrimitives, _updateOutputPrimitives)
+        })
+      case _ => throw new UnsupportedOperationException
     }
-    val indexes = Array.fill(srcs.length)(0)
 
-    val primitive = MklDnn.PrimitiveCreate2(primDesc, srcs, indexes, srcs.length, dsts, dsts.length)
-
-    updateOutputMemoryPrimitives = srcs ++ dsts
-    updateOutputPrimitives = Array(primitive)
-
+    // init once
+    // if the output is not null, it means we have initialized the primitives before.
+    // so we do not need create weightAndBias native space again.
     if (output == null || output.isInstanceOf[DnnTensor[_]] &&
       output.toTensor[Float].size().deep != outputFormats()(0).shape.deep) {
       output = initTensor(outputFormats()(0))
@@ -194,6 +260,7 @@ class SpatialBatchNormalization(
       updateOutputTensors = null
     }
 
+    // init once
     if (this.weightAndBias.native == null) {
       if (modelPhase == InferencePhase) {
         this.runningMean.setMemoryData(
@@ -275,7 +342,7 @@ class SpatialBatchNormalization(
     // [PERF] the format of gradInput should be the same as input
     val backwardDesc = modelPhase match {
       case TrainingPhase =>
-        MklDnn.BatchNormBackwardDescInit(PropKind.Backward,
+        MklDnnMemory.BatchNormBackwardDescInit(PropKind.Backward,
           inputFormats()(0).getMemoryDescription(),
           inputFormats()(0).getMemoryDescription(), eps.toFloat,
           MklDnn.BatchNormFlag.mkldnn_use_scaleshift)
@@ -285,7 +352,7 @@ class SpatialBatchNormalization(
     val gradWeightAndBias: NativeData = NativeData(Array(nOutput * 2), Memory.Format.x)
     val gradWeightPrimitive = gradWeightAndBias.getPrimitive(runtime)
 
-    val primDesc = MklDnn.PrimitiveDescCreate(backwardDesc, runtime.engine, 0)
+    val primDesc = MklDnnMemory.PrimitiveDescCreate(backwardDesc, runtime.engine, 0)
 
     _gradInputFormats = Array(MemoryData.operationWant(primDesc, Query.DiffSrcPd))
 
@@ -298,7 +365,7 @@ class SpatialBatchNormalization(
     val indexes = Array.fill(srcs.length)(0)
     val dsts = Array(gradInputFormats()(0), gradWeightAndBias).map(_.getPrimitive(runtime))
 
-    val primitive = MklDnn.PrimitiveCreate2(primDesc, srcs, indexes, srcs.length,
+    val primitive = MklDnnMemory.PrimitiveCreate2(primDesc, srcs, indexes, srcs.length,
       dsts, dsts.length)
 
     updateGradInputMemoryPrimitives = srcs ++ dsts
@@ -347,8 +414,18 @@ class SpatialBatchNormalization(
     (Array(weightAndBias.dense), Array(gradWeightAndBias.dense))
   }
 
+  override def paramsMMap(): (Array[TensorMMap], Array[TensorMMap]) = {
+    (Array(weightAndBias), Array(gradWeightAndBias))
+  }
+
   override def getExtraParameter(): Array[Tensor[Float]] = {
-    Array(runningMean.dense, runningVariance.dense)
+    if (needScale) {
+      runningMeanScaled.copy(runningMean.dense).div(scaleFactor)
+      runningVarianceScaled.copy(runningVariance.dense).div(scaleFactor)
+      Array(runningMeanScaled, runningVarianceScaled)
+    } else {
+      Array(runningMean.dense, runningVariance.dense)
+    }
   }
 
   override def toString(): String = {
@@ -368,12 +445,6 @@ class SpatialBatchNormalization(
     }
     this
   }
-
-  override def release(): Unit = {
-    super.release()
-    List(weightAndBias, gradWeightAndBias, runningMean, runningVariance).foreach(_.release())
-    List(mean, variance).foreach(_.release())
-  }
 }
 
 object SpatialBatchNormalization {
@@ -385,8 +456,9 @@ object SpatialBatchNormalization {
     initWeight: Tensor[Float] = null,
     initBias: Tensor[Float] = null,
     initGradWeight: Tensor[Float] = null,
-    initGradBias: Tensor[Float] = null): SpatialBatchNormalization = {
+    initGradBias: Tensor[Float] = null,
+    format: DataFormat = DataFormat.NCHW): SpatialBatchNormalization = {
     new SpatialBatchNormalization(nOutput, eps, momentum, initWeight, initBias, initGradWeight,
-      initGradBias)
+      initGradBias, format = format)
   }
 }

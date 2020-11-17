@@ -20,9 +20,16 @@ import com.intel.analytics.bigdl.nn.abstractnn.{Activity, TensorModule}
 import com.intel.analytics.bigdl.tensor.{DnnTensor, Tensor}
 
 class ReorderMemory(inputFormat: MemoryData, outputFormat: MemoryData,
-  gradInputFormat: MemoryData, gradOutputFormat: MemoryData
-) extends MklDnnLayer {
+  gradInputFormat: MemoryData, gradOutputFormat: MemoryData,
+  memoryOwner: MemoryOwner = null) extends MklDnnLayer with Releasable {
 
+  // ReorderMemory is a special layer. It can be owned by other layers.
+  // So there is an optional MemoryOwner that can be null.
+  // If it is null, this means the ReorderMemory is a normal layer.
+  // If it is not null, it means ReorderMemory is owned by another layer
+  if (memoryOwner != null) {
+    memoryOwner.registerResource(this)
+  }
   _outputFormats = Array(outputFormat)
   _gradInputFormats = Array(gradInputFormat)
 
@@ -33,11 +40,15 @@ class ReorderMemory(inputFormat: MemoryData, outputFormat: MemoryData,
 
   private def initMemory(src: MemoryData, shape: Array[Int], layout: Int)
     : Array[MemoryData] = {
-    src match {
-      case h: HeapData => Array(HeapData(shape, layout))
-      case n: NativeData => Array(NativeData(shape, layout))
+    val ret = src match {
+      case h: HeapData => Array(HeapData(shape, layout, src.dataType))
+      case n: NativeData => Array(NativeData(shape, layout, src.dataType))
       case _ => throw new UnsupportedOperationException("Not support such memory format")
     }
+
+    ret(0).setMask(src.mask)
+    ret(0).setScales(src.scales)
+    ret.asInstanceOf[Array[MemoryData]]
   }
 
   private def shapeToString(shape: Array[Int]): String = {
@@ -55,6 +66,40 @@ class ReorderMemory(inputFormat: MemoryData, outputFormat: MemoryData,
     if (format.layout == Memory.Format.nhwc && format.isInstanceOf[HeapData]) {
       tensor.toTensor[Float].resize(format.shape)
     }
+    // for mkldnn, it always use tnc format shape even though format is ntc
+    if (format.layout == Memory.Format.ntc && format.isInstanceOf[HeapData]) {
+      tensor.toTensor[Float].resize(format.shape)
+    }
+  }
+
+  private def createInt8PrimDesc(): Long = {
+    val attr = MklDnnMemory.CreateAttr()
+    MklDnn.AttrSetIntOutputRoundMode(attr, 1)
+
+    if (realOutput(0).scales == null || realOutput(0).scales.isEmpty) {
+      realOutput(0).setMask(realInput(0).mask)
+      realOutput(0).setScales(realInput(0).scales)
+    }
+
+    // if convert s8/u8 to f32, we should set the scale factor to 1.0f/x
+    if (realOutput(0).dataType == DataType.F32) {
+      realOutput(0).setScales(realOutput(0).scales.map(1.0f / _))
+    }
+
+    // copy the scales back to outputFormats if not equal
+    if (realOutput(0) ne _outputFormats(0)) {
+      _outputFormats(0).setMask(realOutput(0).mask)
+      _outputFormats(0).setScales(realOutput(0).scales)
+    }
+
+    require(realOutput(0).scales.nonEmpty)
+    MklDnn.AttrSetOutputScales(attr, realOutput(0).scales.length, realOutput(0).mask,
+      realOutput(0).scales)
+
+    MklDnnMemory.ReorderPrimitiveDescCreateV2(
+      realInput(0).getPrimitiveDescription(runtime),
+      realOutput(0).getPrimitiveDescription(runtime),
+      attr)
   }
 
   override private[mkldnn] def initFwdPrimitives(inputs: Array[MemoryData], phase: Phase) = {
@@ -76,19 +121,29 @@ class ReorderMemory(inputFormat: MemoryData, outputFormat: MemoryData,
     realOutput = _outputFormats
 
     if (inputLayout != outputLayout) {
-      if (inputLayout == Memory.Format.nhwc) {
-        // remind: if format of input MemoryData is nhwc, its shape should be output shape
+      if (inputLayout == Memory.Format.nhwc || inputLayout == Memory.Format.ntc) {
+        // remind: if format of input MemoryData is nhwc or ntc,
+        // its shape should be output shape
         realInput = initMemory(_inputFormats(0), outputShape, inputLayout)
-      } else if (outputLayout == Memory.Format.nhwc) {
-        // remind: if format of output MemoryData is nhwc, its shape should be input shape
+      } else if (outputLayout == Memory.Format.nhwc || outputLayout == Memory.Format.ntc) {
+        // remind: if format of output MemoryData is nhwc or ntc,
+        // its shape should be input shape
         realOutput = initMemory(_outputFormats(0), inputShape, outputLayout)
       }
     }
 
-    val fwdReorderPrimDesc = MklDnn.ReorderPrimitiveDescCreate(
-      realInput(0).getPrimitiveDescription(runtime),
-      realOutput(0).getPrimitiveDescription(runtime))
-    val fwdReorderPrim = MklDnn.PrimitiveCreate2(fwdReorderPrimDesc,
+    val noInt8Formats = inputFormats()(0).dataType == DataType.F32 &&
+      outputFormats()(0).dataType == DataType.F32
+
+    val fwdReorderPrimDesc = if (noInt8Formats) {
+      MklDnnMemory.ReorderPrimitiveDescCreate(
+        realInput(0).getPrimitiveDescription(runtime),
+        realOutput(0).getPrimitiveDescription(runtime))
+    } else {
+      createInt8PrimDesc()
+    }
+
+    val fwdReorderPrim = MklDnnMemory.PrimitiveCreate2(fwdReorderPrimDesc,
       Array(realInput(0).getPrimitive(runtime)), Array(0), 1,
       Array(realOutput(0).getPrimitive(runtime)), 1)
 
@@ -108,10 +163,6 @@ class ReorderMemory(inputFormat: MemoryData, outputFormat: MemoryData,
 
   override def getUpdateOutputMemoryPrimitives(): Array[Long] = {
     realInput.map(_.getPrimitive(runtime)) ++ realOutput.map(_.getPrimitive(runtime))
-  }
-  override def updateOutput(input: Activity): Activity = {
-    output = super.updateOutput(input)
-    output
   }
 
   override private[bigdl] def initBwdPrimitives(grads: Array[MemoryData], phase: Phase) = {
@@ -136,19 +187,21 @@ class ReorderMemory(inputFormat: MemoryData, outputFormat: MemoryData,
     realgradOutput = _gradOutputFormats
 
     if (gradInputLayout != gradOutputLayout) {
-      if (gradOutputLayout == Memory.Format.nhwc) {
-        // remind: if format of gradOutput MemoryData is nhwc, its shape should be gradInput shape
+      if (gradOutputLayout == Memory.Format.nhwc || gradOutputLayout == Memory.Format.ntc) {
+        // remind: if format of gradOutput MemoryData is nhwc or ntc,
+        // its shape should be gradInput shape
         realgradOutput = initMemory(_gradOutputFormats(0), gradInputShape, gradOutputLayout)
-      } else if (gradInputLayout == Memory.Format.nhwc) {
-        // remind: if format of gradInput MemoryData is nhwc, its shape should be gradOutput shape
+      } else if (gradInputLayout == Memory.Format.nhwc || gradInputLayout == Memory.Format.ntc) {
+        // remind: if format of gradInput MemoryData is nhwc or ntc,
+        // its shape should be gradOutput shape
         realgradInput = initMemory(_gradInputFormats(0), gradOutputShape, gradInputLayout)
       }
     }
 
-    val bwdReorderPrimDesc = MklDnn.ReorderPrimitiveDescCreate(
+    val bwdReorderPrimDesc = MklDnnMemory.ReorderPrimitiveDescCreate(
       realgradOutput(0).getPrimitiveDescription(runtime),
       realgradInput(0).getPrimitiveDescription(runtime))
-    val bwdReorderPrim = MklDnn.PrimitiveCreate2(bwdReorderPrimDesc,
+    val bwdReorderPrim = MklDnnMemory.PrimitiveCreate2(bwdReorderPrimDesc,
       realgradOutput.map(_.getPrimitive(runtime)), Array(0), 1,
       realgradInput.map(_.getPrimitive(runtime)), 1)
 
@@ -175,16 +228,17 @@ class ReorderMemory(inputFormat: MemoryData, outputFormat: MemoryData,
 }
 
 object ReorderMemory {
-  def apply(inputFormat: MemoryData, outputFormat: MemoryData, gradInputFormat: MemoryData,
-    gradOutputFomat: MemoryData): ReorderMemory = {
-    new ReorderMemory(inputFormat, outputFormat, gradInputFormat, gradOutputFomat)
+  // We don't use "apply" as the function name here. The reason is that scala does not
+  // allow overloaded function (functions having the same name) with default parameters
+  // Hence, we bypass this issue by defining two functions.
+  def create(inputFormat: MemoryData, outputFormat: MemoryData, gradInputFormat: MemoryData,
+    gradOutputFomat: MemoryData)(implicit  memoryOwner: MemoryOwner = null): ReorderMemory = {
+    new ReorderMemory(inputFormat, outputFormat, gradInputFormat, gradOutputFomat, memoryOwner)
   }
 
-  def apply(outputFormat: MemoryData, gradInputFormat: MemoryData): ReorderMemory = {
-    new ReorderMemory(null, outputFormat, gradInputFormat, null)
-  }
-
-  def apply(outputFormat: MemoryData): ReorderMemory = {
-    new ReorderMemory(null, outputFormat, null, null)
+  def apply(outputFormat: MemoryData, gradInputFormat: MemoryData = null)
+    (implicit memoryOwner: MemoryOwner = null): ReorderMemory = {
+    new ReorderMemory(null, outputFormat, gradInputFormat, null,
+      memoryOwner)
   }
 }

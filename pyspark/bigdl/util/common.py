@@ -64,7 +64,10 @@ class GatewayWrapper(SingletonMixin):
 
 
 class JavaCreator(SingletonMixin):
-    __creator_class=["com.intel.analytics.bigdl.python.api.PythonBigDLKeras"]
+    __creator_class=[
+        "com.intel.analytics.bigdl.python.api.PythonBigDLKeras",
+        "com.intel.analytics.bigdl.python.api.PythonBigDLOnnx"
+    ]
 
     @classmethod
     def add_creator_class(cls, jinvoker):
@@ -419,6 +422,14 @@ def init_engine(bigdl_type="float"):
     # Spark context is supposed to have been created when init_engine is called
     get_spark_context()._jvm.org.apache.spark.bigdl.api.python.BigDLSerDe.initialize()
 
+def get_bigdl_engine_type(bigdl_type="float"):
+    return callBigDlFunc(bigdl_type, "getEngineType")
+
+def set_optimizer_version(optimizerVersion, bigdl_type="float"):
+    return callBigDlFunc(bigdl_type, "setOptimizerVersion", optimizerVersion)
+
+def get_optimizer_version(bigdl_type="float"):
+    return callBigDlFunc(bigdl_type, "getOptimizerVersion")
 
 def init_executor_gateway(sc, bigdl_type="float"):
     callBigDlFunc(bigdl_type, "initExecutorGateway", sc, sc._gateway._gateway_client.port)
@@ -576,6 +587,7 @@ def _get_gateway():
 def callBigDlFunc(bigdl_type, name, *args):
     """ Call API in PythonBigDL """
     gateway = _get_gateway()
+    args = [_py2java(gateway, a) for a in args]
     error = Exception("Cannot find function: %s" % name)
     for jinvoker in JavaCreator.instance(bigdl_type, gateway).value:
         # hasattr(jinvoker, name) always return true here,
@@ -630,7 +642,6 @@ def _java2py(gateway, r, encoding="bytes"):
 def callJavaFunc(func, *args):
     """ Call Java Function """
     gateway = _get_gateway()
-    args = [_py2java(gateway, a) for a in args]
     result = func(*args)
     return _java2py(gateway, result)
 

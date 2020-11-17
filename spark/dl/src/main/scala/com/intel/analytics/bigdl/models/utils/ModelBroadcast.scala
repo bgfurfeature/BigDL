@@ -21,12 +21,17 @@ import java.util.UUID
 
 import com.intel.analytics.bigdl.Module
 import com.intel.analytics.bigdl.nn.Container
+import com.intel.analytics.bigdl.nn.abstractnn.Activity
+import com.intel.analytics.bigdl.nn.mkldnn.{MklDnnLayer, TensorMMap}
 import com.intel.analytics.bigdl.tensor.TensorNumericMath.TensorNumeric
 import com.intel.analytics.bigdl.tensor._
+import com.intel.analytics.bigdl.utils.{Engine, MklDnn}
 import com.intel.analytics.bigdl.utils.Util._
+import com.intel.analytics.bigdl.utils.intermediate.IRGraph
 import org.apache.commons.lang3.SerializationUtils
 import org.apache.spark.SparkContext
 import org.apache.spark.broadcast.Broadcast
+import org.apache.zookeeper.KeeperException.UnimplementedException
 
 import scala.collection.mutable.ArrayBuffer
 import scala.reflect.ClassTag
@@ -45,6 +50,11 @@ trait ModelBroadcast[T] extends Serializable {
    */
   def broadcast(sc: SparkContext, model: Module[T]): this.type
 
+  private[bigdl] def broadcast(sc: SparkContext, model: Module[T],
+    dummyInput: Activity): this.type = {
+    throw new UnimplementedException
+  }
+
   /**
    * Get the broadcast model on worker
    *
@@ -53,6 +63,11 @@ trait ModelBroadcast[T] extends Serializable {
    * @return model
    */
   def value(initGradient: Boolean = false, shareWeight: Boolean = true): Module[T]
+
+  private[bigdl] def value(initGradient: Boolean, shareWeight: Boolean,
+    dummyInput: Activity): Module[T] = {
+    throw new UnimplementedException
+  }
 
   def uuid(): String = _uuid
 }
@@ -80,10 +95,18 @@ object ModelBroadcast {
 private[bigdl] class ModelBroadcastImp[T: ClassTag](applyProtoBuffer: Boolean = false)
   (implicit ev: TensorNumeric[T]) extends ModelBroadcast[T] {
 
+  private type NativeType = (String, (Array[TensorMMap], Array[TensorMMap]))
   private var broadcastModel: Broadcast[ModelInfo[T]] = _
   private var broadcastConsts: Broadcast[Map[String, Tensor[_]]] = _
   private var broadcastParameters: Broadcast[Array[Tensor[T]]] = _
+  private var broadcastParametersNative: Broadcast[Array[NativeType]] = _
+  private var nodeNumber : Int = _
+  private var coreNumber : Int = _
 
+  private def setNodeAndCore(): Unit = {
+    nodeNumber = Engine.nodeNumber()
+    coreNumber = Engine.coreNumber()
+  }
   /**
    * broadcast the model
    * first get and clear Const values from the model
@@ -112,9 +135,10 @@ private[bigdl] class ModelBroadcastImp[T: ClassTag](applyProtoBuffer: Boolean = 
 
       // For quantized model if we don't clone weightsBias, the original model will be released also
       // when we delete all models used in `ModelBroadcast`.
-      putWeightBias(SerializationUtils.clone(weightsBias), model)
+      putWeightBias(cloneParameters(weightsBias), model)
       initGradWeightBias(weightsBias, model)
     }
+    setNodeAndCore()
     this
   }
 
@@ -127,6 +151,7 @@ private[bigdl] class ModelBroadcastImp[T: ClassTag](applyProtoBuffer: Boolean = 
    * @return model
    */
   override def value(initGradient: Boolean = false, shareWeight: Boolean = true): Module[T] = {
+    Engine.setNodeAndCore(nodeNumber, coreNumber)
     CachedModels.deleteAll(uuid)
     if (applyProtoBuffer) {
       val localModel = broadcastModel.value.model.clone(false)
@@ -145,7 +170,7 @@ private[bigdl] class ModelBroadcastImp[T: ClassTag](applyProtoBuffer: Boolean = 
       val parameters = if (shareWeight) {
         broadcastParameters.value
       } else {
-        SerializationUtils.clone(broadcastParameters.value)
+        cloneParameters(broadcastParameters.value)
       }
 
       // share weight
@@ -200,6 +225,54 @@ private[bigdl] class ModelBroadcastImp[T: ClassTag](applyProtoBuffer: Boolean = 
       Array()
     }
   }
+
+  private def getTensorMMaps(ir: IRGraph[T]) = {
+    ir.graph
+      .getSortedForwardExecutions()
+      .filter(_.element.isInstanceOf[MklDnnLayer])
+      .map { node =>
+        val element = node.element
+        val name = element.getName()
+        val tensorMMap = element.asInstanceOf[MklDnnLayer].paramsMMap()
+        (name, tensorMMap)
+      }
+  }
+
+  override def broadcast(sc: SparkContext, model: Module[T],
+    dummyInput: Activity): this.type = {
+    if (model.isInstanceOf[IRGraph[T]] && Engine.getEngineType() == MklDnn &&
+      Engine.isMultiModels) {
+      val clonedModel = model.asInstanceOf[IRGraph[T]].cloneModule()
+      clonedModel.forward(dummyInput)
+
+      broadcastParametersNative = sc.broadcast(getTensorMMaps(clonedModel))
+    }
+
+    this.broadcast(sc, model)
+    this
+  }
+
+  override def value(initGradient: Boolean, shareWeight: Boolean,
+    dummyInput: Activity): Module[T] = {
+    val model = value(initGradient, shareWeight)
+
+    if (model.isInstanceOf[IRGraph[T]] && Engine.getEngineType() == MklDnn &&
+      Engine.isMultiModels) {
+      model.forward(dummyInput)
+
+      if (shareWeight) {
+        getTensorMMaps(model.asInstanceOf[IRGraph[T]]).zip(broadcastParametersNative.value)
+          .foreach { case (src, dst) =>
+            if (src._1 == dst._1) {
+              src._2._1.zip(dst._2._1)
+                .filter(x => x._1 != null && x._2 != null)
+                .foreach{ case (x, y) => x.setNative(y) }
+            }
+          }
+      }
+    }
+    model
+  }
 }
 
 private[bigdl] class ModelInfo[T: ClassTag](val uuid: String, @transient var model: Module[T])(
@@ -220,12 +293,12 @@ private[bigdl] class ModelInfo[T: ClassTag](val uuid: String, @transient var mod
   }
 }
 
-private[bigdl] object ModelInfo {
+object ModelInfo {
   def apply[T: ClassTag](uuid: String, model: Module[T])(
     implicit ev: TensorNumeric[T]): ModelInfo[T] = new ModelInfo[T](uuid, model)
 }
 
-private[bigdl] object CachedModels {
+object CachedModels {
   import java.util.concurrent.ConcurrentHashMap
 
   import scala.collection._

@@ -21,8 +21,8 @@ import com.intel.analytics.bigdl.nn.mkldnn
 import com.intel.analytics.bigdl.nn.mkldnn.Phase.TrainingPhase
 import com.intel.analytics.bigdl.numeric.NumericFloat
 import com.intel.analytics.bigdl.tensor.Tensor
-import com.intel.analytics.bigdl.utils.BigDLSpecHelper
-import com.intel.analytics.bigdl.utils.intermediate.{IRToBlas, IRToDnn, ReflectionUtils}
+import com.intel.analytics.bigdl.utils.{BigDLSpecHelper, ReflectionUtils}
+import com.intel.analytics.bigdl.utils.intermediate.{IRToBlas, IRToDnn}
 import com.intel.analytics.bigdl.{Module, nn}
 
 class ReflectionUtilsSpec extends BigDLSpecHelper {
@@ -71,7 +71,7 @@ class ReflectionUtilsSpec extends BigDLSpecHelper {
     Equivalent.nearequals(weight1, weight2) should be (true)
     Equivalent.nearequals(gradWeight1, gradWeight2) should be (true)
 
-    Equivalent.nearequals(Tools.dense(modelDnn.gradInput).toTensor,
+    Equivalent.nearequals(Tools.dense(seq.gradInput).toTensor,
       modelBlas.gradInput.toTensor[Float]) should be (true)
   }
 

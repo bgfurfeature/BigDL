@@ -15,7 +15,7 @@
  */
 package com.intel.analytics.bigdl.nn.mkldnn
 
-import com.intel.analytics.bigdl.mkl.{Memory, MklDnn}
+import com.intel.analytics.bigdl.mkl.DataType
 import com.intel.analytics.bigdl.nn.DynamicContainer
 import com.intel.analytics.bigdl.nn.abstractnn.{AbstractModule, Activity}
 import com.intel.analytics.bigdl.tensor.{DenseType, DnnTensor, MklDnnType, Tensor}
@@ -36,6 +36,11 @@ trait MklDnnModule extends MklDnnModuleHelper {
 
   def setRuntime(runtime: MklDnnRuntime): Unit = {
     this.runtime = runtime
+  }
+
+  private[bigdl] def getRuntime: MklDnnRuntime = {
+    require(runtime != null, s"you should init the mkldnn runtime first")
+    runtime
   }
 
   /**
@@ -69,9 +74,14 @@ trait MklDnnModule extends MklDnnModuleHelper {
   private[mkldnn] def gradOutputFormats(): Array[MemoryData]
 
   private[mkldnn] def gradOutputWeightFormats(): Array[MemoryData]
+
+  def setQuantize(value: Boolean): this.type
 }
 
-trait MklDnnModuleHelper {
+trait MklDnnModuleHelper extends MemoryOwner {
+
+  @transient protected implicit lazy val _this : MemoryOwner = this
+
   protected def initActivity(formats: Array[MemoryData]): Activity = {
     if (formats.length == 1) {
       initTensor(formats(0))
@@ -80,12 +90,20 @@ trait MklDnnModuleHelper {
     }
   }
 
-  protected def initTensor(format: MemoryData): Tensor[Float] = {
+  protected def initTensor(format: MemoryData): Tensor[_] = {
+    val paddingShape = format.getPaddingShape
+    val realSize = format.getRealSize
+
     format match {
       case d: NativeData =>
-        DnnTensor[Float](Memory.GetPaddingShape(format.getMemoryDescription()))
+        d.dataType match {
+          case DataType.S8 => DnnTensor[Byte](paddingShape, realSize)
+          case DataType.U8 => DnnTensor[Byte](paddingShape, realSize)
+          case DataType.S32 => DnnTensor[Int](paddingShape, realSize)
+          case DataType.F32 => DnnTensor[Float](paddingShape, realSize)
+        }
       case d: HeapData =>
-        Tensor[Float](Memory.GetPaddingShape(format.getMemoryDescription()))
+        Tensor[Float](paddingShape)
       case _ => throw new UnsupportedOperationException("memory format is not supported")
     }
   }
@@ -147,7 +165,8 @@ trait MklDnnLayer extends AbstractModule[Activity, Activity, Float] with MklDnnM
   }
 
   def getUpdateOutputMemoryPrimitives(): Array[Long] = {
-    inputFormats().map(_.getPrimitive(runtime)) ++ outputFormats().map(_.getPrimitive(runtime))
+    inputFormats().map(_.getPrimitive(runtime)) ++
+      outputFormats().map(_.getPrimitive(runtime))
   }
   def getUpdateGradInputMemoryPrimitives(): Array[Long] = {
     gradOutputFormats().map(_.getPrimitive(runtime)) ++
@@ -228,12 +247,12 @@ trait MklDnnLayer extends AbstractModule[Activity, Activity, Float] with MklDnnM
   }
 
 
-  override private[mkldnn] def inputFormats() = {
+  override private[bigdl] def inputFormats() = {
     require(_inputFormats != null, "You should call initFwdPrimitives first")
     _inputFormats
   }
 
-  override private[mkldnn] def gradInputFormats() = {
+  override private[bigdl] def gradInputFormats() = {
     require(_gradInputFormats != null, "You should call initBwdPrimitives first")
     _gradInputFormats
   }
@@ -243,7 +262,7 @@ trait MklDnnLayer extends AbstractModule[Activity, Activity, Float] with MklDnnM
     _outputFormats
   }
 
-  override private[mkldnn] def gradOutputFormats() = {
+  override private[bigdl] def gradOutputFormats() = {
     require(_gradOutputFormats != null, "You should call initBwdPrimitives first")
     _gradOutputFormats
   }
@@ -261,23 +280,14 @@ trait MklDnnLayer extends AbstractModule[Activity, Activity, Float] with MklDnnM
   }
 
   override def release(): Unit = {
-    val tensors: ArrayBuffer[DnnTensor[Float]] = ArrayBuffer.empty
-    List(output, gradInput).filter(_ != null).foreach { t =>
-      if (t.isTensor && t.toTensor[Float].getTensorType == MklDnnType) {
-        tensors.append(t.asInstanceOf[DnnTensor[Float]])
-      }
+    this.releaseResources()
+  }
 
-      if (t.isTable) {
-        val table = t.toTable
-        var i = 1
-        while (i <= table.length()) {
-          tensors.append(table(i))
-          i += 1
-        }
-      }
-    }
+  override def setQuantize(value: Boolean): MklDnnLayer.this.type = this
 
-    tensors.foreach(_.release())
+  def paramsMMap(): (Array[TensorMMap], Array[TensorMMap]) = {
+    // return null for weight and gradWeight by default
+    (Array.empty[TensorMMap], Array.empty[TensorMMap])
   }
 }
 
@@ -368,6 +378,14 @@ trait MklDnnContainer extends DynamicContainer[Activity, Activity, Float] with M
 
   override def release(): Unit = {
     super.release()
-    reorderManager.release()
+    this.releaseResources()
+  }
+
+  override def setQuantize(value: Boolean): this.type = {
+    this.modules.foreach {
+      case mkldnnModule: MklDnnModule => mkldnnModule.setQuantize(value)
+      case _ =>
+    }
+    this
   }
 }

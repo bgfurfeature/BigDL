@@ -32,6 +32,7 @@ from bigdl.util.common import get_node_and_core_number
 from bigdl.util.common import init_engine
 from bigdl.util.common import to_list
 from bigdl.dataset.dataset import *
+import warnings
 
 if sys.version >= '3':
     long = int
@@ -68,6 +69,32 @@ class Top5Accuracy(JavaValue):
     def __init__(self, bigdl_type="float"):
         JavaValue.__init__(self, None, bigdl_type)
 
+class MeanAveragePrecision(JavaValue):
+    """
+    Calculate the Mean Average Precision for top-k confident predictions.
+    The algorithm follows VOC Challenge after 2007
+
+    >>> MAP = MeanAveragePrecision(10, 20)
+    creating: createMeanAveragePrecision
+    """
+    def __init__(self, k, classes, bigdl_type="float"):
+        JavaValue.__init__(self, None, bigdl_type, k, classes)
+
+class MeanAveragePrecisionObjectDetection(JavaValue):
+    """
+    Calculate the Mean Average Precision for Object Detection.
+
+    >>> MAPObj = MeanAveragePrecisionObjectDetection(20)
+    creating: createMeanAveragePrecisionObjectDetection
+    """
+    def __init__(self, classes, iou=0.5, use_voc2007=False, skip_class=-1, bigdl_type="float"):
+        """
+        :param classes: the number of classes
+        :param iou: the IOU threshold
+        :param use_voc2007: use validation method before voc2010 (i.e. voc2007)
+        :param skip_class: skip calculation on a specific class (e.g. background)
+        """
+        JavaValue.__init__(self, None, bigdl_type, classes, iou, use_voc2007, skip_class)
 
 class Loss(JavaValue):
 
@@ -834,6 +861,8 @@ class Optimizer(BaseOptimizer):
         :param end_trigger: when to end the optimization
         :param batch_size: training batch size
         """
+        warnings.warn("You are recommended to use `create` method to create an optimizer.")
+        assert isinstance(training_rdd, RDD), "Only type of RDD is allowed"
         self.pvalue = DistriOptimizer(model,
                                       training_rdd,
                                       criterion,

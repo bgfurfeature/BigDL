@@ -19,7 +19,7 @@ package com.intel.analytics.bigdl.nn.abstractnn
 import java.nio.ByteOrder
 
 import com.intel.analytics.bigdl._
-import com.intel.analytics.bigdl.dataset.{LocalDataSet, MiniBatch, PaddingParam, Sample}
+import com.intel.analytics.bigdl.dataset._
 import com.intel.analytics.bigdl.nn.Graph.ModuleNode
 import com.intel.analytics.bigdl.nn.quantized.Quantization
 import com.intel.analytics.bigdl.nn.{Module, _}
@@ -30,6 +30,7 @@ import com.intel.analytics.bigdl.transform.vision.image.{DistributedImageFrame, 
 import com.intel.analytics.bigdl.utils.TorchObject.TYPE_MODULE
 import com.intel.analytics.bigdl.utils._
 import com.intel.analytics.bigdl.utils.caffe.CaffePersister
+import com.intel.analytics.bigdl.utils.intermediate.ConversionUtils
 import com.intel.analytics.bigdl.utils.serializer._
 import com.intel.analytics.bigdl.utils.tf.{TensorflowDataFormat, TensorflowSaver}
 import org.apache.commons.lang3.SerializationUtils
@@ -70,6 +71,29 @@ abstract class AbstractModule[A <: Activity: ClassTag, B <: Activity: ClassTag, 
    * The cached gradient of activities. So we don't compute it again when need it
    */
   var gradInput: A = Activity.allocate[A, T]()
+
+  protected var inputsFormats: Seq[Int] = null
+  protected var outputsFormats: Seq[Int] = null
+
+  /**
+   * set input formats for graph
+   * @param formats
+   * @return
+   */
+  def setInputFormats(formats: Seq[Int]): this.type = {
+    inputsFormats = formats
+    this
+  }
+
+  /**
+   * set output formats for graph
+   * @param formats
+   * @return
+   */
+  def setOutputFormats(formats: Seq[Int]): this.type = {
+    outputsFormats = formats
+    this
+  }
 
   /**
    * Get the scale of gradientWeight
@@ -363,7 +387,7 @@ abstract class AbstractModule[A <: Activity: ClassTag, B <: Activity: ClassTag, 
    *
    * @return this
    */
-  final def setExtraParameter(extraParam: Array[Tensor[T]]): this.type = {
+  def setExtraParameter(extraParam: Array[Tensor[T]]): this.type = {
     val currentExtraParam = this.getExtraParameter()
     if (extraParam != null && currentExtraParam != null) {
       require(extraParam.length == currentExtraParam.length,
@@ -529,7 +553,7 @@ abstract class AbstractModule[A <: Activity: ClassTag, B <: Activity: ClassTag, 
    * @return self
    */
   @deprecated("please use recommended saveModule(path, overWrite)", "0.3.0")
-  final def save(path : String, overWrite: Boolean = false) : this.type = {
+  def save(path : String, overWrite: Boolean = false) : this.type = {
     this.clearState()
     File.save(this, path, overWrite)
     this
@@ -645,6 +669,7 @@ abstract class AbstractModule[A <: Activity: ClassTag, B <: Activity: ClassTag, 
    * @param batchSize total batchSize for all partitions.
    *                  if -1, default is 4 * partitionNumber of dataset
    */
+
   final def predictClass(dataset: RDD[Sample[T]], batchSize: Int = -1): RDD[Int] = {
     Predictor(this).predictClass(dataset, batchSize)
   }
@@ -826,7 +851,18 @@ abstract class AbstractModule[A <: Activity: ClassTag, B <: Activity: ClassTag, 
   def toGraph(startNodes: ModuleNode[T]*): Graph[T] = {
     val starts = if (startNodes.isEmpty) Array(Input[T]()) else startNodes.toArray
     val endNodes = this.getEndNodes(starts)
-    Graph(starts, endNodes)
+    var graph = Graph(starts, endNodes)
+    if (graph.isInstanceOf[StaticGraph[T]]) {
+      // Merge nested graphs inside to make the whole graph non-nested
+      graph = graph.asInstanceOf[StaticGraph[T]].toSingleGraph()
+    }
+    if (inputsFormats != null) {
+      graph.setInputFormats(inputsFormats)
+    }
+    if (outputsFormats != null) {
+      graph.setOutputFormats(outputsFormats)
+    }
+    graph
   }
 
   /**
@@ -857,6 +893,20 @@ abstract class AbstractModule[A <: Activity: ClassTag, B <: Activity: ClassTag, 
     batchSize: Option[Int] = None
   ): Array[(ValidationResult, ValidationMethod[T])] = {
     Evaluator(this).test(dataset, vMethods.map(v => v), batchSize)
+  }
+
+
+  /**
+   * use ValidationMethod to evaluate module on the given rdd dataset
+   * @param dataset
+   * @param vMethods
+   * @return
+   */
+  final def evaluate(
+    dataset: RDD[MiniBatch[T]],
+    vMethods: Array[_ <:ValidationMethod[T]]
+  ): Array[(ValidationResult, ValidationMethod[T])] = {
+    Evaluator(this).testMiniBatch(dataset, vMethods.map(v => v))
   }
 
   /**
@@ -902,7 +952,7 @@ abstract class AbstractModule[A <: Activity: ClassTag, B <: Activity: ClassTag, 
    * @return
    */
   final def quantize(): Module[T] = {
-    Quantization.quantize(this)
+    ConversionUtils.convert[T](this, true)
   }
 
   // ================================= Internal APIs ===========================================
@@ -1014,6 +1064,8 @@ abstract class AbstractModule[A <: Activity: ClassTag, B <: Activity: ClassTag, 
           require(copiedModuleParamTable.get(name) != None, s"cloned module should have for $name")
           setLayerWeightAndBias(params,
             copiedModuleParamTable.get(name).get.asInstanceOf[Table], deepCopy)
+        case _ =>
+          throw new UnsupportedOperationException("unsupported $name and $params")
       }
     }
   }
@@ -1075,6 +1127,8 @@ abstract class AbstractModule[A <: Activity: ClassTag, B <: Activity: ClassTag, 
         } else {
           if (matchAll) new Exception(s"module $name cannot find corresponding weight bias")
         }
+      case _ =>
+        throw new UnsupportedOperationException("unsupported $name and $targetParams")
     }
   }
 
@@ -1087,7 +1141,7 @@ abstract class AbstractModule[A <: Activity: ClassTag, B <: Activity: ClassTag, 
    * @return current end nodes
    */
   private[bigdl] def getEndNodes(startNodes: Array[ModuleNode[T]]): Array[ModuleNode[T]] = {
-    val endNodes = Array(this.inputs(startNodes: _*))
+    val endNodes = Array(this.processInputs(startNodes))
     endNodes
   }
 

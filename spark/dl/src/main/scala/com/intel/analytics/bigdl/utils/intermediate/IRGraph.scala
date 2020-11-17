@@ -22,7 +22,8 @@ import com.intel.analytics.bigdl.nn.abstractnn.{AbstractModule, Activity, DataFo
 import com.intel.analytics.bigdl.nn.mkldnn._
 import com.intel.analytics.bigdl.tensor.Tensor
 import com.intel.analytics.bigdl.tensor.TensorNumericMath.TensorNumeric
-import com.intel.analytics.bigdl.utils.{Engine, MklBlas, Node, T}
+import com.intel.analytics.bigdl.utils._
+
 import scala.reflect.ClassTag
 
 /**
@@ -51,16 +52,30 @@ private[bigdl] class IRGraph[T: ClassTag](
   require(inputFormats.length == inputs.length, s"IRGraph: inputFormats" +
     s"length ${inputFormats.length} should be same with input nodes length ${inputs.length}")
   require(outputFormats.length == outputs.length, s"IRGraph: outputFormats" +
-    s"length ${inputFormats.length} should be same with input nodes length ${outputs.length}")
+    s"length ${outputFormats.length} should be same with output nodes length ${outputs.length}")
 
-  private var graph: Graph[T] = null
+  private[bigdl] var graph: Graph[T] = null
+
+  private[bigdl] def isBuild(): Boolean = graph != null
 
   override def updateOutput(input: Activity): Activity = {
     if (graph == null) {
       throw new UnsupportedOperationException("forward not supported, Please build graph first")
     }
-    initPrimitives(input)
-    output = graph.updateOutput(input)
+    if (graph.isInstanceOf[DnnGraph]) {
+      // if using multi MKL-DNN model, we just use current thread directly
+      // because it's in sequential mode of MKL and MKL-DNN
+      if (Engine.isMultiModels) {
+        initPrimitives(input)
+        graph.updateOutput(input)
+      } else {
+        Engine.dnnComputing.invokeAndWait2(Array(0).map(_ => () => {
+          initPrimitives(input)
+          graph.updateOutput(input)
+        }))
+      }
+    } else graph.updateOutput(input)
+    output = graph.output
     output
   }
 
@@ -68,7 +83,12 @@ private[bigdl] class IRGraph[T: ClassTag](
     if (graph == null) {
       throw new UnsupportedOperationException("backward not supported, Please build graph first")
     }
-    gradInput = graph.updateGradInput(input, gradOutput)
+    if (graph.isInstanceOf[DnnGraph]) {
+      Engine.dnnComputing.invokeAndWait2(Array(0).map(_ => () => {
+        graph.updateGradInput(input, gradOutput)
+      }))
+    } else graph.updateGradInput(input, gradOutput)
+    gradInput = graph.gradInput
     gradInput
   }
 
@@ -76,7 +96,11 @@ private[bigdl] class IRGraph[T: ClassTag](
     if (graph == null) {
       throw new UnsupportedOperationException("backward not supported, Please build graph first")
     }
-    graph.accGradParameters(input, gradOutput)
+    if (graph.isInstanceOf[DnnGraph]) {
+      Engine.dnnComputing.invokeAndWait2(Array(0).map(_ => () => {
+        graph.accGradParameters(input, gradOutput)
+      }))
+    } else graph.accGradParameters(input, gradOutput)
   }
 
   def build(): this.type = {
@@ -87,6 +111,8 @@ private[bigdl] class IRGraph[T: ClassTag](
   override def parameters(): (Array[Tensor[T]], Array[Tensor[T]]) = {
     graph.parameters()
   }
+
+  override def getParametersTable(): Table = graph.getParametersTable()
 
   override def training(): this.type = {
     train = true
@@ -122,7 +148,13 @@ private[bigdl] class IRGraph[T: ClassTag](
       if (input.isInstanceOf[Tensor[T]]) {
         // todo: handle for 3 dimensions, expand 3 dims to 4 dims
         val size = input.toTensor[T].size()
-        val sizeNew = if (size.length == 3)  Array(size(0), 1, size(1), size(2)) else size
+        val sizeNew = if (size.length == 3 && inputFormats(0) != Memory.Format.ntc
+          && inputFormats(0) != Memory.Format.tnc) {
+          Array(size(0), 1, size(1), size(2))
+        } else if (inputFormats(0) == Memory.Format.nhwc) {
+          // always use NCHW to create heap data
+          Array(size(0), size(3), size(1), size(2))
+        } else size
         inputMemory(0) = HeapData(sizeNew, inputFormats(0))
       } else {
         val tensors = input.toTable
@@ -133,17 +165,39 @@ private[bigdl] class IRGraph[T: ClassTag](
             "Only support input with tensor type, table not supported")
           val t1 = t._1.asInstanceOf[Int] // starts from 1
           val t2 = t._2.asInstanceOf[Tensor[T]]
-          inputMemory(t1 - 1) = HeapData(t2.size(), inputFormats(t1 - 1))
+          if (inputFormats(t1 - 1 ) == Memory.Format.nhwc) {
+            val sizeNew = Array(t2.size(1), t2.size(4), t2.size(2), t2.size(3))
+            inputMemory(t1 - 1) = HeapData(sizeNew, inputFormats(t1 - 1))
+          } else {
+            inputMemory(t1 - 1) = HeapData(t2.size(), inputFormats(t1 - 1))
+          }
         })
       }
       val dnnGraph = graph.asInstanceOf[DnnGraph]
+      val phase = if (dnnGraph.isTraining()) Phase.TrainingPhase else Phase.InferencePhase
       dnnGraph.setRuntime(new MklDnnRuntime())
-      dnnGraph.initFwdPrimitives(inputMemory)
+      dnnGraph.initFwdPrimitives(inputMemory, phase)
       if (dnnGraph.isTraining()) {
-        dnnGraph.initBwdPrimitives(dnnGraph.outputFormats())
-        dnnGraph.initGradWPrimitives(dnnGraph.outputFormats())
+        dnnGraph.initBwdPrimitives(dnnGraph.outputFormats(), phase)
+        dnnGraph.initGradWPrimitives(dnnGraph.outputFormats(), phase)
       }
       initPrim = true
+    }
+  }
+
+  def setQuantize(value: Boolean): this.type = {
+    require(graph != null, s"you should build the graph first")
+    if (graph.isInstanceOf[DnnGraph]) {
+      graph.asInstanceOf[DnnGraph].setQuantize(value)
+    }
+    this
+  }
+
+  override def release(): Unit = {
+    if (graph.isInstanceOf[DnnGraph]) {
+      Engine.dnnComputing.invokeAndWait2(Array(0).map(_ => () => {
+        graph.release()
+      }))
     }
   }
 }

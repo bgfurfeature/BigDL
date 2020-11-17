@@ -23,7 +23,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 import org.apache.log4j.Logger
 import org.apache.spark._
 import com.intel.analytics.bigdl.mkl.MKL
-import com.intel.analytics.bigdl.mkl.hardware.CpuInfo
+import com.intel.analytics.bigdl.mkl.hardware.{Affinity, CpuInfo}
 import org.apache.spark.utils.SparkUtils
 import py4j.GatewayServer
 
@@ -37,12 +37,21 @@ sealed trait EngineType
 case object MklBlas extends EngineType
 case object MklDnn extends EngineType
 
+/**
+ * define optimizer version trait
+ */
+sealed trait OptimizerVersion
+
+case object OptimizerV1 extends OptimizerVersion
+case object OptimizerV2 extends OptimizerVersion
+
 
 object Engine {
 
   // Initialize some properties for mkldnn engine. We should call it at the beginning.
   // Otherwise some properties will have no effect.
-  if (System.getProperty("bigdl.engineType") == "mkldnn") {
+  if (System.getProperty("bigdl.engineType") == "mkldnn" &&
+    System.getProperty("bigdl.multiModels", "false") == "false") {
     setMklDnnEnvironments()
   }
 
@@ -214,11 +223,26 @@ object Engine {
     }
   }
 
+  /**
+   * Notice: Please use property bigdl.optimizerVersion to set optimizerVersion.
+   * Default version is OptimizerV1
+   */
+  private var optimizerVersion: OptimizerVersion = {
+    System.getProperty("bigdl.optimizerVersion", "optimizerv1").toLowerCase(Locale.ROOT) match {
+      case "optimizerv1" => OptimizerV1
+      case "optimizerv2" => OptimizerV2
+      case optimizerVersion => throw new IllegalArgumentException(s"Unknown type $optimizerVersion")
+    }
+  }
+
   // Thread pool for default use
   @volatile private var _default: ThreadPool = null
 
   // Thread pool for layer use
   @volatile private var _model: ThreadPool = new ThreadPool(1)
+
+  // Thread pool for blas wrapper layer
+  private[bigdl] var wrapperComputing: ThreadPool = null
 
   // This thread is mainly for mkldnn library.
   // Because if we use the parent thread directly, there will be two bugs,
@@ -234,6 +258,8 @@ object Engine {
   // For `context` in ThreadPool, it is the called thread when poolSize is 1.
   // So many usages of that thread, we will not change it for now.
   val dnnComputing: ThreadPool = new ThreadPool(1)
+  // We need to init dnn thread in case that users directly call model operation in java local
+  initDnnThread()
 
   /**
    * If user undefine the property bigdl.coreNumber, it will return physical core number
@@ -250,7 +276,7 @@ object Engine {
     val coreNum = Runtime.getRuntime().availableProcessors()
     require(coreNum > 0, "Get a non-positive core number")
     // We assume the HT is enabled
-    // Todo: check the Hyper threading
+    // TODO: check the Hyper threading
     if (coreNum > 1) coreNum / 2 else 1
   }
 
@@ -311,6 +337,19 @@ object Engine {
   /**
    * This method should only be used for test purpose.
    *
+   * @param optimizerVersion
+   */
+  private[bigdl] def setOptimizerVersion(optimizerVersion : OptimizerVersion): Unit = {
+    this.optimizerVersion = optimizerVersion
+  }
+
+  private[bigdl] def getOptimizerVersion(): OptimizerVersion = {
+    this.optimizerVersion
+  }
+
+  /**
+   * This method should only be used for test purpose.
+   *
    * @param engineType
    */
   private[bigdl] def setEngineType(engineType: EngineType): Unit = {
@@ -319,6 +358,13 @@ object Engine {
 
   private[bigdl] def getEngineType(): EngineType = {
     this.engineType
+  }
+
+  private[bigdl] def isMultiModels: Boolean = {
+    getEngineType() match {
+      case MklBlas => true
+      case MklDnn => System.getProperty("bigdl.multiModels", "false").toBoolean
+    }
   }
 
   private[bigdl] def model: ThreadPool = {
@@ -339,6 +385,9 @@ object Engine {
     if(_default == null || _default.getPoolSize != defaultPoolSize) {
       _default = new ThreadPool(defaultPoolSize)
     }
+    if (wrapperComputing == null || wrapperComputing.getPoolSize != defaultPoolSize) {
+      wrapperComputing = new ThreadPool(defaultPoolSize)
+    }
 
     // for dnn model we should set the pool size to 1 also.
     // otherwise, it will downgrade the performance and
@@ -356,6 +405,10 @@ object Engine {
     // this thread and the omp threads forked from computing.
     if (engineType == MklDnn) {
       dnnComputing.setMKLThreadOfMklDnnBackend(MKL.getMklNumThreads)
+      _model.setMKLThreadOfMklDnnBackend(MKL.getMklNumThreads)
+    }
+    if (System.getProperty("multiThread", "false").toBoolean) {
+      wrapperComputing.setMKLThread(1)
     }
   }
 
@@ -547,11 +600,34 @@ object Engine {
   }
 
   private def setMklDnnEnvironments(): Unit = {
-    val default = Math.ceil(Runtime.getRuntime.availableProcessors().toFloat / 2).toInt
+    import com.intel.analytics.bigdl.mkl.hardware.CpuInfo
+    val affinityCores = Affinity.getAffinity
+    val physicalCoreNum = CpuInfo.getPhysicalProcessorCount
+    val affinityCoreNum = affinityCores.length
+
+    // 1. this library in docker/cgroup env, which sets cpu affinity fist. so we can't use
+    //    resources exceeding limits.
+    // 2. this library is in a hyper threading envs, so we should set the mkl num threads
+    //    to physical core number for performance
+
+    val default = if (affinityCores.min > 0 && affinityCores.max >= physicalCoreNumber) {
+      affinityCoreNum
+    } else if (physicalCoreNum > affinityCoreNum ) {
+      affinityCoreNum
+    } else {
+      physicalCoreNum
+    }
+
     val threadsNumber = System.getProperty("bigdl.mklNumThreads", default.toString)
     System.setProperty("bigdl.mklNumThreads", s"$threadsNumber")
 
     System.setProperty("bigdl.disable.mklBlockTime", "true")
     System.setProperty("bigdl.coreNumber", "1")
+  }
+
+  private def initDnnThread(): Unit = {
+    if (engineType == MklDnn) {
+      dnnComputing.setMKLThreadOfMklDnnBackend(MKL.getMklNumThreads)
+    }
   }
 }

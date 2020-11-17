@@ -16,17 +16,20 @@
 package com.intel.analytics.bigdl.nn.mkldnn
 
 import com.intel.analytics.bigdl.mkl._
-import com.intel.analytics.bigdl.nn.Utils
-import com.intel.analytics.bigdl.nn.abstractnn.Activity
+import com.intel.analytics.bigdl.nn.{Utils => NNUtils}
+import com.intel.analytics.bigdl.nn.abstractnn.{Activity, DataFormat}
+import com.intel.analytics.bigdl.nn.mkldnn.Phase.InferencePhase
 import com.intel.analytics.bigdl.tensor.Tensor
 
 class AvgPooling(
-  kW: Int,
-  kH: Int,
+  var kW: Int,
+  var kH: Int,
   dW: Int = 1,
   dH: Int = 1,
   padW: Int = 0,
-  padH: Int = 0
+  padH: Int = 0,
+  globalPooling: Boolean = false,
+  val format: DataFormat = DataFormat.NCHW
 ) extends MklDnnLayer {
   @transient private var paddingTL: Array[Int] = _
   @transient private var paddingBR: Array[Int] = _
@@ -62,30 +65,46 @@ class AvgPooling(
 
   override private[mkldnn] def initFwdPrimitives(inputs: Array[MemoryData], phase: Phase) = {
     _inputFormats = singleNativeData(inputs)
-    val strides = Array(dW, dH)
-    val kernel = Array(kH, kW)
     val n = _inputFormats(0).shape(0)
     val c = _inputFormats(0).shape(1)
     val h = _inputFormats(0).shape(2)
     val w = _inputFormats(0).shape(3)
+
+    // global average pooling reduce each feature map to a single average value
+    if (globalPooling) {
+      kH = h
+      kW = w
+    }
+
+    val strides = Array(dW, dH)
+    val kernel = Array(kH, kW)
+
     val (pt, pb, pl, pr, oh, ow) = if (padH == -1 && padW == -1) {
-      val sizes = Utils.getSAMEOutSizeAndPadding(h, w, dH, dW, kH, kW)
+      val sizes = NNUtils.getSAMEOutSizeAndPadding(h, w, dH, dW, kH, kW)
       (sizes(0), sizes(1), sizes(2), sizes(3), sizes(4), sizes(5))
     } else {
-      Utils.getPaddingAndOutputSize(h, w, dH, dW, kH, kW, padH, padW, ceilMode)
+      NNUtils.getPaddingAndOutputSize(h, w, dH, dW, kH, kW, padH, padW, ceilMode)
     }
 
     paddingTL = Array(pt, pl)
     paddingBR = Array(pb, pr)
-    val outputMD = MklDnn.MemoryDescInit(4, Array(n, c, oh, ow), DataType.F32, Memory.Format.any)
-    val description = MklDnn.PoolingForwardDescInit(
-      PropKind.Forward, algKind,
+    val outputMD = MklDnnMemory.MemoryDescInit(4, Array(n, c, oh, ow), inputs(0).dataType,
+      Memory.Format.any)
+
+    val kind = if (phase == InferencePhase) {
+      PropKind.ForwardScoring
+    } else {
+      PropKind.ForwardTraining
+    }
+
+    val description = MklDnnMemory.PoolingForwardDescInit(
+      kind, algKind,
       _inputFormats(0).getMemoryDescription(), outputMD, strides, kernel, paddingTL, paddingBR,
       MklDnn.PaddingKind.mkldnnPaddingZero)
-    fwdPD = MklDnn.PrimitiveDescCreate(description, runtime.engine, 0L)
+    fwdPD = MklDnnMemory.PrimitiveDescCreate(description, runtime.engine, 0L)
     _outputFormats = Array(MemoryData.primitiveOutput(fwdPD))
     output = initTensor(_outputFormats(0))
-    updateOutputPrimitives = Array(MklDnn.PrimitiveCreate2(fwdPD,
+    updateOutputPrimitives = Array(MklDnnMemory.PrimitiveCreate2(fwdPD,
       _inputFormats.map(_.getPrimitive(runtime)), Array(0), 1,
       _outputFormats.map(_.getPrimitive(runtime)), 2))
     (_inputFormats, _outputFormats)
@@ -96,14 +115,14 @@ class AvgPooling(
     _gradOutputFormatsForWeight = _gradOutputFormats
     val strides = Array(dW, dH)
     val kernel = Array(kH, kW)
-    val description = MklDnn.PoolingBackwardDescInit(algKind,
+    val description = MklDnnMemory.PoolingBackwardDescInit(algKind,
       _inputFormats(0).getMemoryDescription(),
       _gradOutputFormats(0).getMemoryDescription(),
       strides, kernel, paddingTL, paddingBR, MklDnn.PaddingKind.mkldnnPaddingZero)
 
-    val pd = MklDnn.PrimitiveDescCreate(description, runtime.engine, fwdPD)
-    _gradInputFormats = Array(MemoryData.primitiveGradInput(pd))
-    updateGradInputPrimitives = Array(MklDnn.PrimitiveCreate2(pd,
+    val pd = MklDnnMemory.PrimitiveDescCreate(description, runtime.engine, fwdPD)
+    _gradInputFormats = Array(MemoryData.operationWant(pd, Query.DiffSrcPd))
+    updateGradInputPrimitives = Array(MklDnnMemory.PrimitiveCreate2(pd,
       _gradOutputFormats.map(_.getPrimitive(runtime)),
       Array(0, 0), 2, _gradInputFormats.map(_.getPrimitive(runtime)), 1))
     gradInput = initTensor(_gradInputFormats(0))
@@ -118,6 +137,8 @@ object AvgPooling {
     dW: Int = 1,
     dH: Int = 1,
     padW: Int = 0,
-    padH: Int = 0
-  ): AvgPooling = new AvgPooling(kW, kH, dW, dH, padW, padH)
+    padH: Int = 0,
+    globalPooling: Boolean = false,
+    format: DataFormat = DataFormat.NCHW
+  ): AvgPooling = new AvgPooling(kW, kH, dW, dH, padW, padH, globalPooling, format = format)
 }

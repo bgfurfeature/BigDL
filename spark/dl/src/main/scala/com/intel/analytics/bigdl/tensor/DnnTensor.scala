@@ -17,21 +17,25 @@ package com.intel.analytics.bigdl.tensor
 
 import breeze.linalg.{DenseMatrix, DenseVector}
 import com.intel.analytics.bigdl.mkl.Memory
+import com.intel.analytics.bigdl.nn.mkldnn.{MemoryOwner, Releasable}
 import com.intel.analytics.bigdl.tensor.DnnTensor.DnnTensorUnsupportOperations
 import com.intel.analytics.bigdl.tensor.TensorNumericMath.TensorNumeric
 import com.intel.analytics.bigdl.utils.Table
 import org.apache.spark.mllib.linalg
 import org.apache.spark.mllib.linalg.Matrix
-
 import scala.reflect.ClassTag
 
 class DnnTensor[T: ClassTag](
   private var _storage: DnnStorage[T],
   private var sizes: Array[Int]
-) (implicit ev: TensorNumeric[T])
-  extends DnnTensorUnsupportOperations[T]{
+) (implicit ev: TensorNumeric[T], owner: MemoryOwner)
+  extends DnnTensorUnsupportOperations[T] with Releasable {
 
-  override def nElement(): Int = storage.length()
+  owner.registerResource(this)
+  // performance regression, the sizes.product will make the performance downgrade.
+  private val _nElement: Int = sizes.product
+
+  override def nElement(): Int = _nElement
 
   override def copy(other: Tensor[T]): Tensor[T] = {
     other match {
@@ -134,6 +138,10 @@ class DnnTensor[T: ClassTag](
     true
   }
 
+  override def getType(): TensorDataType = {
+    ev.getType()
+  }
+
   override def hashCode(): Int = {
     val seed = 37
     var hash = 1
@@ -149,8 +157,42 @@ class DnnTensor[T: ClassTag](
     hash
   }
 
-  override def toString(): String = {
-    Tensor[Float]().resize(this.size()).copy(this.asInstanceOf[Tensor[Float]]).toString
+  override def set(): Tensor[T] = {
+    // TODO we will do nothing. the behavior is not the same with DenseTensor
+    this
+  }
+
+  override def set(other: Tensor[T]): Tensor[T] = {
+    require(other.isInstanceOf[DnnTensor[T]], s"only support to set DnnTensor")
+    this._storage.release()
+    this._storage = other.storage().asInstanceOf[DnnStorage[T]]
+    this
+  }
+
+  override def toString: String = {
+    ev.getType() match {
+      case FloatType =>
+        if (size().product != this.nElement()) {
+          val dense = Tensor[Float](Array(this.nElement()))
+          Memory.CopyPtr2Array(this.storageAddress(), 0, dense.storage().array(),
+            0, nElement(), 4)
+          dense.toString
+        } else {
+          val dense = Tensor[Float](size())
+          dense.copy(this.asInstanceOf[DnnTensor[Float]])
+          dense.toString
+        }
+      case ByteType =>
+        val array = new Array[Byte](nElement())
+        Memory.CopyPtr2ByteArray(this.asInstanceOf[DnnTensor[Byte]].storageAddress(), 0,
+          array, 0, nElement(), 1)
+        array.mkString("\t")
+      case IntType =>
+        val array = new Array[Int](nElement())
+        Memory.CopyPtr2IntArray(this.storageAddress(), 0, array, 0, nElement(), 4)
+        array.mkString("\t")
+      case _ => "unknown type"
+    }
   }
 }
 
@@ -172,34 +214,44 @@ object DnnTensor {
     return true
   }
 
-  def apply[T: ClassTag](sizes: Array[Int])(implicit ev: TensorNumeric[T]): DnnTensor[T] = {
+  def apply[T: ClassTag](sizes: Array[Int])(
+    implicit ev: TensorNumeric[T], owner: MemoryOwner): DnnTensor[T] = {
     val storage = new DnnStorage[T](sizes.product)
     new DnnTensor[T](storage, sizes)
   }
 
-  def apply[T: ClassTag](d1: Int)(implicit ev: TensorNumeric[T]): DnnTensor[T] = {
+  def apply[T: ClassTag](sizes: Array[Int], realSize: Long)(
+    implicit ev: TensorNumeric[T], owner: MemoryOwner): DnnTensor[T] = {
+    val storage = new DnnStorage[T](realSize.toInt) // FIXME if size more than int ?
+    new DnnTensor[T](storage, sizes)
+  }
+
+  def apply[T: ClassTag](d1: Int)(
+    implicit ev: TensorNumeric[T], owner: MemoryOwner): DnnTensor[T] = {
     val storage = new DnnStorage[T](d1)
     new DnnTensor[T](storage, Array(d1))
   }
 
-  def apply[T: ClassTag](d1: Int, d2: Int)(implicit ev: TensorNumeric[T]): DnnTensor[T] = {
+  def apply[T: ClassTag](d1: Int, d2: Int)(
+    implicit ev: TensorNumeric[T], owner: MemoryOwner): DnnTensor[T] = {
     val storage = new DnnStorage[T](d1 * d2)
     new DnnTensor[T](storage, Array(d1, d2))
   }
 
-  def apply[T: ClassTag](d1: Int, d2: Int, d3: Int)(implicit ev: TensorNumeric[T]): DnnTensor[T] = {
+  def apply[T: ClassTag](d1: Int, d2: Int, d3: Int)(
+    implicit ev: TensorNumeric[T], owner: MemoryOwner): DnnTensor[T] = {
     val storage = new DnnStorage[T](d1 * d2 * d3)
     new DnnTensor[T](storage, Array(d1, d2, d3))
   }
 
   def apply[T: ClassTag](d1: Int, d2: Int, d3: Int, d4: Int)(
-    implicit ev: TensorNumeric[T]): DnnTensor[T] = {
+    implicit ev: TensorNumeric[T], owner: MemoryOwner): DnnTensor[T] = {
     val storage = new DnnStorage[T](d1 * d2 * d3 * d4)
     new DnnTensor[T](storage, Array(d1, d2, d3, d4))
   }
 
   def apply[T: ClassTag](d1: Int, d2: Int, d3: Int, d4: Int, d5: Int)(
-    implicit ev: TensorNumeric[T]): DnnTensor[T] = {
+    implicit ev: TensorNumeric[T], owner: MemoryOwner): DnnTensor[T] = {
     val storage = new DnnStorage[T](d1 * d2 * d3 * d4 * d5)
     new DnnTensor[T](storage, Array(d1, d2, d3, d4, d5))
   }
@@ -287,6 +339,7 @@ object DnnTensor {
     override def getType(): TensorDataType = ???
     override def diff(other: Tensor[T], count: Int, reverse: Boolean): Boolean = ???
     override def addSingletonDimension(t: Tensor[T], dim: Int): Tensor[T] = ???
+    override def addMultiDimension(t: Tensor[T], dims: Array[Int]): Tensor[T] = ???
     override def reshape(sizes: Array[Int]): Tensor[T] = ???
     override def save(path: String, overWrite: Boolean): DnnTensorUnsupportOperations.this.type = ???
     override def getTensorNumeric(): TensorNumeric[T] = ???
